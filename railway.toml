@@ -13,4 +13,4 @@ restartPolicyType = "on_failure"
 # Discovers 10 new leads, analyzes all pending, queues 8 targets, emails report
 [crons.daily-pipeline]
 schedule = "0 0 * * *"
-command  = "python scripts/run_pipeline.py --discover 10 --queue 8"
+command  = "python scripts/run_pipeline.py --queue 8"

@@ -71,7 +71,8 @@ def cleanup_results() -> int:
 
 def main():
     parser = argparse.ArgumentParser(description="SG Daily end-to-end pipeline")
-    parser.add_argument("--discover",    type=int, default=0,  help="New leads to discover (0=skip)")
+    _discover_default = int(os.environ.get("DAILY_DISCOVER_COUNT", "0"))
+    parser.add_argument("--discover",    type=int, default=_discover_default,  help="New leads to discover (0=skip, or set DAILY_DISCOVER_COUNT env var)")
     parser.add_argument("--queue",       type=int, default=8,  help="Queue size (default: 8)")
     parser.add_argument("--concurrency", type=int, default=3,  help="Analysis concurrency (default: 3)")
     parser.add_argument("--no-email",    action="store_true",  help="Skip outreach + report emails")
