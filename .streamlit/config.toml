@@ -1,0 +1,15 @@
+[theme]
+primaryColor = "#0f3460"
+backgroundColor = "#f8f9fa"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1a1a2e"
+font = "sans serif"
+
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+folderWatchBlacklist = [".venv", ".venv313", "data", "results", "scripts/__pycache__", "pages/__pycache__", "__pycache__"]
+
+[browser]
+gatherUsageStats = false

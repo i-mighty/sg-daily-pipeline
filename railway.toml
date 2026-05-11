@@ -1,0 +1,16 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true"
+healthcheckPath = "/"
+restartPolicyType = "on_failure"
+
+# Persistent volume must be mounted at /data in the Railway dashboard.
+# Set DB_PATH=/data/pipeline.db in Railway environment variables.
+
+# Daily pipeline: 8am SGT = 0:00 UTC
+# Discovers 10 new leads, analyzes all pending, queues 8 targets, emails report
+[crons.daily-pipeline]
+schedule = "0 0 * * *"
+command  = "python scripts/run_pipeline.py --discover 10 --queue 8"

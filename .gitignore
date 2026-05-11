@@ -1,0 +1,12 @@
+.env
+.venv/
+.venv313/
+__pycache__/
+*.pyc
+data/
+results/
+DAILY-QUEUE-*.md
+prospects.csv
+*.pdf
+.DS_Store
+.env

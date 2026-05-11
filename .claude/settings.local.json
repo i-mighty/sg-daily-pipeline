@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.crunchbase.com)",
+      "WebSearch",
+      "WebFetch(domain:www.m-kopa.com)",
+      "Bash(gh api *)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(pip3 install *)",
+      "Bash(uv pip *)",
+      "Bash(uv venv *)",
+      "Bash(.venv313/bin/streamlit run *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8501/)",
+      "Bash(python3 -c ' *)",
+      "Bash(pkill -f streamlit)",
+      "Read(//tmp/**)"
+    ]
+  }
+}
