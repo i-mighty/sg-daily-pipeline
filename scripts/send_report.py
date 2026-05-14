@@ -1,28 +1,24 @@
 #!/usr/bin/env python3
 """
-Send a daily pipeline report via Gmail SMTP.
+Send a daily pipeline report via Resend.
 
 Environment variables required:
+    RESEND_API_KEY  Resend API key
     EMAIL_TO        recipient address (e.g. dailyasia9@gmail.com)
-    EMAIL_FROM      sender address (your Gmail)
-    SMTP_USER       same as EMAIL_FROM
-    SMTP_PASS       Gmail App Password (16-char, no spaces)
-    SMTP_HOST       smtp.gmail.com  (default)
-    SMTP_PORT       587             (default)
+    EMAIL_FROM      verified Resend sender address
 
 Usage:
     python scripts/send_report.py
     python scripts/send_report.py --run-id 3   # attach stats from a specific pipeline run
 """
 
+import base64
 import os
-import smtplib
 import sys
 from datetime import datetime
-from email.mime.application import MIMEApplication
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from pathlib import Path
+
+import resend
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -239,37 +235,28 @@ def build_html(run_stats: dict | None = None) -> str:
 # ── Send ──────────────────────────────────────────────────────────────────────
 
 def send(run_stats: dict | None = None):
+    import json
+
+    api_key   = os.environ.get("RESEND_API_KEY", "")
     to_addr   = os.environ.get("EMAIL_TO", "")
     from_addr = os.environ.get("EMAIL_FROM", "")
-    smtp_user = os.environ.get("SMTP_USER", from_addr)
-    smtp_pass = os.environ.get("SMTP_PASS", "")
-    smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
 
-    if not all([to_addr, from_addr, smtp_pass]):
-        print("ERROR: EMAIL_TO, EMAIL_FROM, and SMTP_PASS must be set.")
+    if not all([api_key, to_addr, from_addr]):
+        print("ERROR: RESEND_API_KEY, EMAIL_TO, and EMAIL_FROM must be set.")
         return False
+
+    resend.api_key = api_key
 
     today   = datetime.now().strftime("%B %d, %Y")
     subject = f"SG Daily Pipeline Report — {today}"
     html    = build_html(run_stats)
 
-    msg = MIMEMultipart("mixed")
-    msg["Subject"] = subject
-    msg["From"]    = from_addr
-    msg["To"]      = to_addr
+    # Build PDF attachments from today's queued leads
+    attachments = []
+    date_str    = datetime.now().strftime("%Y-%m-%d")
+    queue_entry = db.get_queue(date_str)
 
-    # HTML body
-    alt = MIMEMultipart("alternative")
-    alt.attach(MIMEText(html, "html"))
-    msg.attach(alt)
-
-    # Attach PDFs from today's queued leads
-    date_str     = datetime.now().strftime("%Y-%m-%d")
-    queue_entry  = db.get_queue(date_str)
-    attached     = 0
     if queue_entry and queue_entry.get("queue_json"):
-        import json
         queued_names = {r.get("Company Name", "").strip().lower()
                         for r in json.loads(queue_entry["queue_json"] or "[]")}
         for lead in db.get_analyses():
@@ -279,26 +266,29 @@ def send(run_stats: dict | None = None):
             if not pdf_path.exists():
                 continue
             try:
-                with open(pdf_path, "rb") as f:
-                    part = MIMEApplication(f.read(), _subtype="pdf")
                 safe_name = (lead.get("company_name") or "prospect").replace(" ", "-")
-                part.add_header("Content-Disposition", "attachment",
-                                filename=f"{safe_name}-analysis.pdf")
-                msg.attach(part)
-                attached += 1
+                attachments.append({
+                    "filename": f"{safe_name}-analysis.pdf",
+                    "content":  list(pdf_path.read_bytes()),
+                })
             except Exception as e:
                 print(f"  Could not attach PDF for {lead.get('company_name')}: {e}")
 
-    if attached:
-        print(f"Attaching {attached} PDF report(s)")
+    if attachments:
+        print(f"Attaching {len(attachments)} PDF report(s)")
 
     try:
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(from_addr, to_addr, msg.as_string())
-        print(f"Report sent to {to_addr} ({attached} PDFs attached)")
+        params = {
+            "from":    f"SG Daily Pipeline <{from_addr}>",
+            "to":      [to_addr],
+            "subject": subject,
+            "html":    html,
+        }
+        if attachments:
+            params["attachments"] = attachments
+
+        resend.Emails.send(params)
+        print(f"Report sent to {to_addr} ({len(attachments)} PDFs attached)")
         return True
     except Exception as e:
         print(f"ERROR sending email: {e}")
