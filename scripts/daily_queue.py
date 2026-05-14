@@ -44,17 +44,15 @@ def _email(d: dict) -> dict:
     return e if isinstance(e, dict) else {}
 
 
-def load_queue_candidates(category_filter: str | None) -> list[dict]:
-    """Load all done analyses from DB, excluding already-sent outreach."""
+def load_queue_candidates(mode: str, category_filter: str | None = None) -> list[dict]:
+    """Load done analyses for the given mode, excluding already-sent outreach."""
     import json as _json
     candidates = []
 
     for lead in db.get_analyses():
-        # Only SG Daily mode analyses (or those with hook_ideas)
-        if lead.get("mode", "sg-daily") == "generic" and not lead.get("hook_ideas"):
+        if lead.get("mode", "sg-daily") != mode:
             continue
 
-        # Skip if outreach already sent
         if (lead.get("outreach_status") or "").lower() in {"sent", "replied", "converted"}:
             continue
 
@@ -232,24 +230,31 @@ def build_queue_csv(targets: list[dict]) -> list[dict]:
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Generate daily SG Daily outreach queue")
-    parser.add_argument("--count",    type=int, default=8, help="Number of targets (default: 8)")
+    parser = argparse.ArgumentParser(description="Generate daily outreach queue")
+    parser.add_argument("--mode",     default="sg-daily", help="Mode to queue for (default: sg-daily)")
+    parser.add_argument("--count",    type=int, default=None,
+                        help="Number of targets (default: mode's queue_size)")
     parser.add_argument("--category", type=str, default=None,
-                        help="Filter: 'Media Feature Lead' or 'Influencer Management Lead'")
+                        help="Optional lead_category filter")
     args = parser.parse_args()
 
-    candidates = load_queue_candidates(args.category)
+    # Resolve count: arg > mode's queue_size > 8
+    if args.count is None:
+        mode_config = db.get_mode(args.mode)
+        args.count  = mode_config["queue_size"] if mode_config else 8
+
+    candidates = load_queue_candidates(args.mode, args.category)
 
     if not candidates:
-        print("No completed SG Daily analyses found.")
-        print("Run: python scripts/discover_leads.py")
-        print("Then: python scripts/run_batch.py --mode sg-daily")
+        print(f"No completed analyses found for mode '{args.mode}'.")
+        print(f"Run: python scripts/discover_leads.py --mode {args.mode}")
+        print(f"Then: python scripts/run_batch.py --mode {args.mode}")
         sys.exit(0)
 
     targets   = candidates[:args.count]
     date_str  = datetime.now().strftime("%Y-%m-%d")
-    queue_md  = QUEUE_DIR / f"DAILY-QUEUE-{date_str}.md"
-    queue_csv = RESULTS / f"queue-{date_str}.csv"
+    queue_md  = QUEUE_DIR / f"DAILY-QUEUE-{args.mode}-{date_str}.md"
+    queue_csv = RESULTS / f"queue-{args.mode}-{date_str}.csv"
 
     # Write markdown
     md_content = build_queue_md(targets, args.count, date_str)
@@ -266,7 +271,7 @@ def main():
     print(f"Queue CSV: {queue_csv}")
 
     # Persist to DB
-    db.save_queue(date_str, rows, md_content)
+    db.save_queue(date_str, rows, md_content, mode=args.mode)
 
     # Summary
     cats = {}

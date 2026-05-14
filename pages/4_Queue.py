@@ -3,6 +3,7 @@ from pathlib import Path
 
 import streamlit as st
 
+import db
 from utils import (dm_email, dm_name, grade_emoji, load_analyses,
                    load_queue_files, mark_outreach_sent, score_emoji,
                    stream_script)
@@ -10,7 +11,18 @@ from utils import (dm_email, dm_name, grade_emoji, load_analyses,
 st.set_page_config(page_title="Daily Queue", page_icon="📬", layout="wide")
 
 st.title("📬 Daily Outreach Queue")
-st.caption("Your 5–10 highest-priority targets for today. Copy, send, mark done.")
+st.caption("Your highest-priority targets for today. Copy, send, mark done.")
+
+# ── Mode selector ─────────────────────────────────────────────────────────────
+
+modes      = db.get_modes()
+mode_names = [m["name"]  for m in modes] or ["sg-daily"]
+mode_labels= [m["label"] for m in modes] or ["SG Daily"]
+
+sel_idx    = st.selectbox("Mode", range(len(mode_names)),
+                           format_func=lambda i: f"{mode_labels[i]} ({mode_names[i]})",
+                           label_visibility="collapsed")
+sel_mode   = mode_names[sel_idx] if mode_names else "sg-daily"
 
 # ── Generate queue ─────────────────────────────────────────────────────────────
 
@@ -26,7 +38,7 @@ with col_cat:
     cat_filter = st.selectbox("Filter category", ["All", "Media Feature Lead", "Influencer Management Lead"])
 
 if generate:
-    args = ["scripts/daily_queue.py", "--count", str(count)]
+    args = ["scripts/daily_queue.py", "--mode", sel_mode, "--count", str(count)]
     if cat_filter != "All":
         args += ["--category", cat_filter]
 
@@ -51,10 +63,11 @@ queue_mds = load_queue_files()
 tab_live, tab_saved = st.tabs(["🎯 Live Queue", "📁 Saved Queue Files"])
 
 with tab_live:
-    # Build live queue: done analyses, not sent, sorted by score, top N
+    # Build live queue: done analyses for this mode, not sent, sorted by score, top N
     candidates = [
         a for a in analyses
         if a.get("outreach_status", "").lower() not in {"sent", "replied", "converted"}
+        and a.get("mode", "sg-daily") == sel_mode
     ]
 
     if cat_filter != "All":

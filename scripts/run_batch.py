@@ -562,8 +562,17 @@ def slugify(text: str) -> str:
 
 def _build_prompt(url: str, company_name: str, industry_hint: str, notes: str,
                   mode: str = "generic", lead_category: str = "") -> str:
-    today    = datetime.now().strftime("%Y-%m-%d")
-    template = SG_DAILY_PROMPT if mode == "sg-daily" else ANALYSIS_PROMPT
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Load prompt from DB; fall back to hardcoded constants for built-in modes
+    mode_config = db.get_mode(mode)
+    if mode_config and mode_config.get("analysis_prompt", "").strip():
+        template = mode_config["analysis_prompt"]
+    elif mode == "sg-daily":
+        template = SG_DAILY_PROMPT
+    else:
+        template = ANALYSIS_PROMPT
+
     return (template
         .replace("{URL}", url)
         .replace("{COMPANY_NAME}", company_name or url)

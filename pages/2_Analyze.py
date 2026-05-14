@@ -1,5 +1,7 @@
 import pandas as pd
 import streamlit as st
+
+import db
 from utils import load_prospects, stream_script
 
 st.set_page_config(page_title="Analyze Leads", page_icon="⚡", layout="wide")
@@ -47,8 +49,15 @@ n_selected   = len(selected_idx)
 st.divider()
 c1, c2, c3, c4 = st.columns(4)
 
-run_all    = c1.toggle("Run all pending", value=True)
-mode       = c2.selectbox("Mode", ["sg-daily", "generic"], index=0)
+run_all = c1.toggle("Run all pending", value=True)
+
+modes       = db.get_modes()
+mode_names  = [m["name"]  for m in modes] or ["sg-daily"]
+mode_labels = [m["label"] for m in modes] or ["SG Daily"]
+sel_idx     = c2.selectbox("Mode", range(len(mode_names)),
+                            format_func=lambda i: f"{mode_labels[i]} ({mode_names[i]})")
+mode        = mode_names[sel_idx] if mode_names else "sg-daily"
+
 limit      = c3.number_input("Limit", min_value=1, max_value=50,
                               value=min(5, len(pending)), step=1,
                               help="Max companies per run (cost control)")

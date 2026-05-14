@@ -3,4 +3,4 @@ builder = "nixpacks"
 
 [deploy]
 cronSchedule = "0 0 * * *"
-startCommand = "python scripts/run_pipeline.py --discover 10 --queue 8"
+startCommand = "python scripts/run_pipeline.py"

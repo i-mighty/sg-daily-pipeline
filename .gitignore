@@ -6,6 +6,7 @@ __pycache__/
 data/
 results/
 DAILY-QUEUE-*.md
+DAILY-QUEUE-*-*.md
 prospects.csv
 *.pdf
 .DS_Store

@@ -74,7 +74,7 @@ def build_outreach_email(lead: dict) -> dict | None:
     }
 
 
-def send_outreach(date_str: str, dry_run: bool = False) -> list[dict]:
+def send_outreach(date_str: str, dry_run: bool = False, mode: str = "sg-daily") -> list[dict]:
     """Send outreach emails for the given date's queue. Returns results list."""
     api_key   = os.environ.get("RESEND_API_KEY", "")
     from_addr = os.environ.get("EMAIL_FROM", "")
@@ -85,7 +85,7 @@ def send_outreach(date_str: str, dry_run: bool = False) -> list[dict]:
 
     resend.api_key = api_key
 
-    queue_entry = db.get_queue(date_str)
+    queue_entry = db.get_queue(date_str, mode=mode)
     if not queue_entry:
         print(f"No queue found for {date_str}.")
         return []
@@ -105,6 +105,7 @@ def send_outreach(date_str: str, dry_run: bool = False) -> list[dict]:
     targets = [
         a for a in analyses
         if a.get("company_name", "").strip().lower() in queued_names
+        and a.get("mode", "sg-daily") == mode
         and (a.get("outreach_status") or "").lower() not in {"sent", "replied", "converted"}
     ]
 
@@ -173,8 +174,9 @@ def send_outreach(date_str: str, dry_run: bool = False) -> list[dict]:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Send outreach emails to today's queue")
+    parser.add_argument("--mode",    default="sg-daily", help="Mode to send outreach for")
     parser.add_argument("--dry-run", action="store_true", help="Preview without sending")
     parser.add_argument("--date",    default=datetime.now().strftime("%Y-%m-%d"),
                         help="Queue date (default: today)")
     args = parser.parse_args()
-    send_outreach(args.date, dry_run=args.dry_run)
+    send_outreach(args.date, dry_run=args.dry_run, mode=args.mode)

@@ -13,6 +13,20 @@ _default_db = BASE_DIR / "data" / "pipeline.db"
 DB_PATH = Path(os.environ.get("DB_PATH", str(_default_db)))
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS modes (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    name             TEXT    UNIQUE NOT NULL,
+    label            TEXT    NOT NULL,
+    description      TEXT    DEFAULT '',
+    analysis_prompt  TEXT    NOT NULL DEFAULT '',
+    discovery_prompt TEXT    NOT NULL DEFAULT '',
+    discover_count   INTEGER DEFAULT 5,
+    queue_size       INTEGER DEFAULT 8,
+    is_active        INTEGER DEFAULT 1,
+    created_at       TEXT    DEFAULT (datetime('now')),
+    updated_at       TEXT    DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS leads (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     url              TEXT    UNIQUE NOT NULL,
@@ -64,6 +78,38 @@ CREATE TABLE IF NOT EXISTS queue_entries (
 """
 
 
+def _migrate(conn: sqlite3.Connection):
+    """Apply incremental schema changes to existing databases."""
+    # queue_entries: add mode column and unique index
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(queue_entries)").fetchall()}
+    if "mode" not in cols:
+        conn.execute("ALTER TABLE queue_entries ADD COLUMN mode TEXT DEFAULT 'sg-daily'")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_run_date_mode "
+        "ON queue_entries(run_date, mode)"
+    )
+
+
+def _seed_default_modes(conn: sqlite3.Connection):
+    """Insert default modes if the table is empty."""
+    count = conn.execute("SELECT COUNT(*) FROM modes").fetchone()[0]
+    if count > 0:
+        return
+    try:
+        from default_modes import DEFAULT_MODES
+    except ImportError:
+        return
+    for m in DEFAULT_MODES:
+        conn.execute(
+            """INSERT OR IGNORE INTO modes
+               (name, label, description, analysis_prompt, discovery_prompt,
+                discover_count, queue_size, is_active)
+               VALUES (:name,:label,:description,:analysis_prompt,:discovery_prompt,
+                       :discover_count,:queue_size,:is_active)""",
+            m,
+        )
+
+
 def get_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
@@ -75,6 +121,47 @@ def get_db() -> sqlite3.Connection:
 def init_db():
     with get_db() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
+        _seed_default_modes(conn)
+
+
+# ── Mode CRUD ─────────────────────────────────────────────────────────────────
+
+def get_modes(active_only: bool = False) -> list[dict]:
+    sql = "SELECT * FROM modes"
+    if active_only:
+        sql += " WHERE is_active=1"
+    sql += " ORDER BY id ASC"
+    with get_db() as conn:
+        rows = conn.execute(sql).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_mode(name: str) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM modes WHERE name=?", (name,)).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_mode(mode: dict):
+    fields = ["name", "label", "description", "analysis_prompt", "discovery_prompt",
+              "discover_count", "queue_size", "is_active"]
+    row = {f: mode.get(f) for f in fields}
+    row["updated_at"] = datetime.now().isoformat()
+    update = ", ".join(f"{k}=excluded.{k}" for k in row if k != "name")
+    cols   = ", ".join(row.keys())
+    params = ", ".join(f":{k}" for k in row.keys())
+    with get_db() as conn:
+        conn.execute(
+            f"INSERT INTO modes ({cols}) VALUES ({params}) "
+            f"ON CONFLICT(name) DO UPDATE SET {update}",
+            row,
+        )
+
+
+def delete_mode(name: str):
+    with get_db() as conn:
+        conn.execute("DELETE FROM modes WHERE name=?", (name,))
 
 
 # ── Lead CRUD ─────────────────────────────────────────────────────────────────
@@ -199,23 +286,35 @@ def get_pipeline_runs(limit: int = 30) -> list[dict]:
 
 # ── Queue entries ─────────────────────────────────────────────────────────────
 
-def save_queue(run_date: str, queue_json: list, queue_md: str):
+def save_queue(run_date: str, queue_json: list, queue_md: str, mode: str = "sg-daily"):
     with get_db() as conn:
         conn.execute(
-            """INSERT INTO queue_entries (run_date, queue_json, queue_md)
-               VALUES (?, ?, ?)
-               ON CONFLICT DO NOTHING""",
-            (run_date, json.dumps(queue_json), queue_md),
+            """INSERT INTO queue_entries (run_date, queue_json, queue_md, mode)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(run_date, mode) DO UPDATE SET
+                   queue_json=excluded.queue_json,
+                   queue_md=excluded.queue_md""",
+            (run_date, json.dumps(queue_json), queue_md, mode),
         )
 
 
-def get_queue(run_date: str) -> dict | None:
+def get_queue(run_date: str, mode: str = "sg-daily") -> dict | None:
     with get_db() as conn:
         row = conn.execute(
-            "SELECT * FROM queue_entries WHERE run_date=? ORDER BY id DESC LIMIT 1",
-            (run_date,),
+            "SELECT * FROM queue_entries WHERE run_date=? AND mode=? ORDER BY id DESC LIMIT 1",
+            (run_date, mode),
         ).fetchone()
     return dict(row) if row else None
+
+
+def get_all_queues(run_date: str) -> list[dict]:
+    """Return all mode queues for a given date."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM queue_entries WHERE run_date=? ORDER BY mode ASC",
+            (run_date,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────

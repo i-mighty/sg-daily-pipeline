@@ -234,7 +234,7 @@ def build_html(run_stats: dict | None = None) -> str:
 
 # ── Send ──────────────────────────────────────────────────────────────────────
 
-def send(run_stats: dict | None = None):
+def send(run_stats: dict | None = None, mode: str = "sg-daily"):
     import json
 
     api_key   = os.environ.get("RESEND_API_KEY", "")
@@ -247,19 +247,24 @@ def send(run_stats: dict | None = None):
 
     resend.api_key = api_key
 
+    mode_config = db.get_mode(mode)
+    mode_label  = mode_config["label"] if mode_config else mode
+
     today   = datetime.now().strftime("%B %d, %Y")
-    subject = f"SG Daily Pipeline Report — {today}"
+    subject = f"{mode_label} Pipeline Report — {today}"
     html    = build_html(run_stats)
 
-    # Build PDF attachments from today's queued leads
+    # Build PDF attachments from today's queued leads for this mode
     attachments = []
     date_str    = datetime.now().strftime("%Y-%m-%d")
-    queue_entry = db.get_queue(date_str)
+    queue_entry = db.get_queue(date_str, mode=mode)
 
     if queue_entry and queue_entry.get("queue_json"):
         queued_names = {r.get("Company Name", "").strip().lower()
                         for r in json.loads(queue_entry["queue_json"] or "[]")}
         for lead in db.get_analyses():
+            if lead.get("mode", "sg-daily") != mode:
+                continue
             if lead.get("company_name", "").strip().lower() not in queued_names:
                 continue
             pdf_path = Path(lead.get("_pdf_path", "") or "")
@@ -279,7 +284,7 @@ def send(run_stats: dict | None = None):
 
     try:
         params = {
-            "from":    f"SG Daily Pipeline <{from_addr}>",
+            "from":    f"{mode_label} Pipeline <{from_addr}>",
             "to":      [to_addr],
             "subject": subject,
             "html":    html,

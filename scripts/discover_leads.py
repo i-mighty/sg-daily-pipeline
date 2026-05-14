@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
 """
-Autonomous lead discovery for Viral Asia / The SG Daily.
-Searches the web for brands matching the "SG Dollar Filter" and appends
-qualified companies to prospects.csv as pending rows.
+Autonomous lead discovery. Loads the discovery prompt from the modes table in DB,
+runs an agentic web-search loop, and appends qualified companies as pending leads.
 
 Usage:
-    python scripts/discover_leads.py               # 10 leads (5 each category)
-    python scripts/discover_leads.py --count 20    # 20 leads total
-    python scripts/discover_leads.py --cat a       # only Media Feature leads
-    python scripts/discover_leads.py --cat b       # only Influencer Management leads
-    python scripts/discover_leads.py --dry-run     # preview without writing CSV
-
-Requirements:
-    ANTHROPIC_API_KEY env var must be set.
-    source .venv/bin/activate
+    python scripts/discover_leads.py --mode sg-daily --count 10
+    python scripts/discover_leads.py --mode sg-daily --count 20 --dry-run
+    python scripts/discover_leads.py --list-modes
 """
 
 import asyncio
@@ -35,11 +28,11 @@ BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
 import db  # noqa: E402
 
-MODEL           = "claude-haiku-4-5-20251001"  # ~95% cheaper than Opus; plenty for search + JSON output
-MAX_TOKENS      = 3000                          # just needs a JSON array, not a long report
-MAX_TOOL_CALLS  = 15                            # hard cap per discovery run
+MODEL          = "claude-haiku-4-5-20251001"
+MAX_TOKENS     = 3000
+MAX_TOOL_CALLS = 15
 
-# ── Web tools (same implementations as run_batch.py) ─────────────────────────
+# ── Web tools ─────────────────────────────────────────────────────────────────
 
 def _fetch_url(url: str, max_chars: int = 8000) -> str:
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
@@ -60,56 +53,63 @@ def _web_search(query: str, num_results: int = 8) -> str:
         try:
             r = requests.get(
                 "https://api.search.brave.com/res/v1/web/search",
-                headers={"Accept": "application/json", "X-Subscription-Token": os.environ["BRAVE_API_KEY"]},
+                headers={"Accept": "application/json",
+                         "X-Subscription-Token": os.environ["BRAVE_API_KEY"]},
                 params={"q": query, "count": num_results}, timeout=10,
             )
             if r.status_code == 200:
                 items = r.json().get("web", {}).get("results", [])
-                result = "\n\n".join(f"Title: {i.get('title','')}\nURL: {i.get('url','')}\nSnippet: {i.get('description','')}" for i in items)
+                result = "\n\n".join(
+                    f"Title: {i.get('title','')}\nURL: {i.get('url','')}\nSnippet: {i.get('description','')}"
+                    for i in items
+                )
                 if result:
                     return result
         except Exception:
             pass
-        # Fall through to DuckDuckGo
 
-    # Fallback: DuckDuckGo
     try:
         url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote_plus(query)}"
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US"}, timeout=10)
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0",
+                                        "Accept-Language": "en-US"}, timeout=10)
         soup = BeautifulSoup(r.content, "html.parser")
         results = []
         for div in soup.find_all("div", class_="result", limit=num_results):
             ta = div.find("a", class_="result__a")
             sa = div.find("a", class_="result__snippet")
-            if not ta: continue
+            if not ta:
+                continue
             href = ta.get("href", "")
             if "uddg=" in href:
                 href = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
-            results.append(f"Title: {ta.get_text(strip=True)}\nURL: {href}\nSnippet: {sa.get_text(strip=True) if sa else ''}")
+            results.append(
+                f"Title: {ta.get_text(strip=True)}\nURL: {href}\n"
+                f"Snippet: {sa.get_text(strip=True) if sa else ''}"
+            )
         return "\n\n".join(results) or "No results."
     except Exception as e:
         return f"[search error] {e}"
 
 
 def _execute_tool(name: str, inputs: dict) -> str:
-    if name == "fetch_url":   return _fetch_url(inputs["url"])
-    if name == "web_search":  return _web_search(inputs["query"], inputs.get("num_results", 8))
+    if name == "fetch_url":  return _fetch_url(inputs["url"])
+    if name == "web_search": return _web_search(inputs["query"], inputs.get("num_results", 8))
     return f"[unknown tool] {name}"
 
 
 TOOLS = [
     {
         "name": "fetch_url",
-        "description": "Fetch text content from a URL. Use for company websites, resort pages, news articles, review sites.",
+        "description": "Fetch text content from a URL.",
         "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     },
     {
         "name": "web_search",
-        "description": "Search the web. Use for finding brands, OOH ad evidence, resort listings, fintech campaigns.",
+        "description": "Search the web for companies, news, and intelligence.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
+                "query":       {"type": "string"},
                 "num_results": {"type": "integer", "default": 8},
             },
             "required": ["query"],
@@ -117,128 +117,23 @@ TOOLS = [
     },
 ]
 
-# ── Discovery prompt ──────────────────────────────────────────────────────────
+# ── Core discovery ─────────────────────────────────────────────────────────────
 
-DISCOVERY_PROMPT = """You are a lead scout for Viral Asia and "The SG Daily" — a premium media brand
-targeting high-spending Singaporean travelers who take regular weekend and short-break trips to regional
-destinations (Batam, Bintan, Johor Bahru, Desaru, Penang, Langkawi).
+async def discover(num_leads: int, discovery_prompt: str, mode_name: str) -> list[dict]:
+    prompt = discovery_prompt.replace("{NUM_LEADS}", str(num_leads))
 
-## YOUR MISSION
-Find {NUM_LEADS} qualified brands for our "SG Dollar Filter." Use 10-15 focused searches — be precise, not exhaustive.
-searches and page fetches. Quality over speed: only include brands you have actually verified exist and qualify.
-
----
-
-## CATEGORY A — MEDIA FEATURE LEADS (target: {MEDIA_COUNT})
-High-end lifestyle brands at or near Singapore's weekend destinations.
-We pitch them a $1,000 SGD editorial feature in our "Batam Insider" or "Regional Discovery" content series.
-
-Target sub-categories:
-- **Luxury resorts / boutique hotels** in Batam, Bintan, Johor Bahru, Desaru (rooms > $120 SGD/night)
-- **Fine dining** in Johor Bahru or Batam targeting Singaporean diners
-- **Elite golf clubs** in Johor or Bintan (green fees > $80 SGD)
-- **Aesthetic clinics / medical tourism** providers in Malaysia or Indonesia marketing to Singaporeans
-- **Unique experience operators** (yacht charters, private islands, luxury spas, helicopter tours)
-
-Qualification gate: Pricing signals that margins support a $1,000 SGD editorial partnership.
-
----
-
-## CATEGORY B — INFLUENCER MANAGEMENT LEADS (target: {INFLUENCER_COUNT})
-Global or tech-forward brands actively advertising to Singaporeans via Out-of-Home (OOH).
-We pitch them mass content production and "digital surround sound" to complement their OOH spend.
-
-Target sub-categories:
-- **Fintech / crypto / trading apps** with Singapore bus stop or MRT station ads
-- **Travel booking platforms** running Singapore billboard or transit advertising
-- **FMCG premium brands** with active Singapore OOH campaigns
-- **Airlines or ferry operators** with heavy Singapore market advertising
-- **Property or investment platforms** running Singapore OOH campaigns
-
-Qualification gate: Evidence of current or recent OOH advertising in Singapore.
-
----
-
-## RESEARCH PROCESS — EXECUTE ALL OF THESE
-
-**Category A searches:**
-1. Search: "luxury resort Batam Indonesia Singapore tourists 2024 2025"
-2. Search: "boutique hotel Bintan Singapore weekend 2025 best"
-3. Search: "best fine dining Johor Bahru Singapore tourists 2025"
-4. Search: "golf club Johor Bahru Singapore members visitors"
-5. Search: "aesthetic clinic Johor Bahru medical tourism Singaporeans 2025"
-6. Search: "private villa Batam Bintan weekend Singapore"
-7. Search: "Desaru resort Singapore weekend getaway luxury"
-8. Fetch the top 2-3 most promising resort or hotel websites to verify pricing and quality
-
-**Category B searches:**
-9. Search: "OOH advertising Singapore bus stop brands 2024 2025"
-10. Search: "fintech billboard MRT station Singapore advertising 2025"
-11. Search: "Singapore outdoor advertising campaign brands 2025"
-12. Search: "FMCG brand OOH campaign Singapore 2025"
-13. Search: "travel app advertising Singapore bus stop billboard"
-14. Search: "ferry Batam Singapore OOH advertising campaign"
-15. Fetch 2-3 OOH news/industry pages to find specific brand names running Singapore campaigns
-
-**Verification:**
-16. For each shortlisted brand, fetch their website to confirm: active, real web presence, correct category
-17. Look for pricing pages, contact pages, or press mentions to confirm qualification
-
----
-
-## DISQUALIFICATION RULES
-- Generic/budget brands (hostels, fast food, mass market)
-- Brands with no accessible website (Facebook-only is insufficient)
-- Category A brands with no pricing signals above the threshold
-- Category B brands with no evidence of OOH advertising
-- Brands already in the Singapore domestic market only (we need regional/destination brands for Cat A)
-
----
-
-## OUTPUT
-After all your research, return ONLY a valid JSON array (no other text before or after):
-
-```json
-[
-  {
-    "company_name": "Exact Brand Name",
-    "url": "https://www.website.com",
-    "lead_category": "Media Feature Lead",
-    "industry_hint": "Luxury Resort / Fintech / etc.",
-    "priority": "High",
-    "sg_qualifier": "One specific sentence on why this passes the SG Dollar Filter",
-    "notes": "Key intelligence: pricing signals, OOH evidence, location, target market, unique angle"
-  }
-]
-```
-
-Return exactly {NUM_LEADS} brands. Only include brands you verified during research.
-"""
-
-# ── Core discovery ────────────────────────────────────────────────────────────
-
-async def discover(num_leads: int, media_count: int, influencer_count: int) -> list[dict]:
-    prompt = (DISCOVERY_PROMPT
-        .replace("{NUM_LEADS}", str(num_leads))
-        .replace("{MEDIA_COUNT}", str(media_count))
-        .replace("{INFLUENCER_COUNT}", str(influencer_count))
-    )
-
-    client   = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    messages = [{"role": "user", "content": prompt}]
+    client    = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    messages  = [{"role": "user", "content": prompt}]
     full_text = ""
 
-    print(f"Scouting {num_leads} leads ({media_count} Media Feature + {influencer_count} Influencer Mgmt)...")
+    print(f"Scouting {num_leads} leads for mode '{mode_name}'...")
     print(f"Model: {MODEL}  |  Tool call cap: {MAX_TOOL_CALLS}")
 
     tool_call_n = 0
 
     while True:
         response = await client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            tools=TOOLS,
-            messages=messages,
+            model=MODEL, max_tokens=MAX_TOKENS, tools=TOOLS, messages=messages,
         )
 
         for block in response.content:
@@ -258,11 +153,10 @@ async def discover(num_leads: int, media_count: int, influencer_count: int) -> l
 
         messages.append({"role": "assistant", "content": response.content})
 
-        # Hard cap — force output with data gathered so far
         if tool_call_n >= MAX_TOOL_CALLS:
             messages.append({"role": "user", "content": tool_results + [{
                 "type": "text",
-                "text": "You've done enough research. Output the JSON array now with the brands you've found."
+                "text": "You've done enough research. Output the JSON array now with the brands you've found.",
             }]})
             final = await client.messages.create(
                 model=MODEL, max_tokens=MAX_TOKENS, messages=messages
@@ -274,10 +168,8 @@ async def discover(num_leads: int, media_count: int, influencer_count: int) -> l
 
         messages.append({"role": "user", "content": tool_results})
 
-    # Parse JSON from response
     m = re.search(r'```json\s*(\[.*?\])\s*```', full_text, re.DOTALL)
     if not m:
-        # Try to find a raw JSON array
         m = re.search(r'(\[.*?\])', full_text, re.DOTALL)
     if not m:
         print("ERROR: Could not parse JSON from discovery response.")
@@ -297,30 +189,45 @@ async def discover(num_leads: int, media_count: int, influencer_count: int) -> l
 async def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Autonomous lead discovery for The SG Daily")
-    parser.add_argument("--count",   type=int, default=10, help="Total leads to find (default: 10)")
-    parser.add_argument("--cat",     choices=["a", "b", "both"], default="both", help="a=Media Feature, b=Influencer Mgmt")
-    parser.add_argument("--dry-run", action="store_true", help="Preview leads without writing to CSV")
+    parser = argparse.ArgumentParser(description="Autonomous lead discovery")
+    parser.add_argument("--mode",       default="sg-daily", help="Mode name (must exist in DB)")
+    parser.add_argument("--count",      type=int, default=None,
+                        help="Total leads to find (overrides mode's discover_count)")
+    parser.add_argument("--dry-run",    action="store_true", help="Preview without writing to DB")
+    parser.add_argument("--list-modes", action="store_true", help="List available modes and exit")
     args = parser.parse_args()
+
+    if args.list_modes:
+        modes = db.get_modes()
+        if not modes:
+            print("No modes in DB.")
+        for m in modes:
+            status = "active" if m["is_active"] else "inactive"
+            print(f"  {m['name']:20s}  {m['label']}  [{status}]  discover={m['discover_count']}")
+        return
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         sys.exit("ERROR: ANTHROPIC_API_KEY is not set.")
 
-    if args.cat == "a":
-        media_count, influencer_count = args.count, 0
-    elif args.cat == "b":
-        media_count, influencer_count = 0, args.count
-    else:
-        media_count      = args.count // 2
-        influencer_count = args.count - media_count
+    mode_config = db.get_mode(args.mode)
+    if not mode_config:
+        sys.exit(f"ERROR: Mode '{args.mode}' not found in DB. Run --list-modes to see available modes.")
 
-    leads = await discover(args.count, media_count, influencer_count)
-
-    if not leads:
-        print("No leads found. Check your API key and try again.")
+    num_leads = args.count if args.count is not None else mode_config["discover_count"]
+    if num_leads <= 0:
+        print(f"Mode '{args.mode}' has discover_count=0. Pass --count N to override.")
         return
 
-    # Deduplicate against DB
+    discovery_prompt = mode_config["discovery_prompt"]
+    if not discovery_prompt.strip():
+        sys.exit(f"ERROR: Mode '{args.mode}' has no discovery_prompt set.")
+
+    leads = await discover(num_leads, discovery_prompt, args.mode)
+
+    if not leads:
+        print("No leads found.")
+        return
+
     existing_urls = db.get_existing_urls()
     new_leads     = [l for l in leads if l.get("url", "").strip().lower() not in existing_urls]
     dupes         = len(leads) - len(new_leads)
@@ -329,8 +236,8 @@ async def main():
 
     for lead in new_leads:
         cat = lead.get("lead_category", "")
-        print(f"  [{cat[:1].upper()}] {lead.get('company_name','?')} — {lead.get('url','')}")
-        print(f"       {lead.get('sg_qualifier','')}")
+        print(f"  [{cat[:1].upper() if cat else '?'}] {lead.get('company_name','?')} — {lead.get('url','')}")
+        print(f"       {lead.get('sg_qualifier', lead.get('notes', ''))[:100]}")
 
     if args.dry_run:
         print("\n[dry-run] Not written to DB.")
@@ -341,13 +248,13 @@ async def main():
         return
 
     for lead in new_leads:
-        lead.setdefault("status", "pending")
-        lead.setdefault("mode", "sg-daily")
-        lead.setdefault("outreach_status", "pending")
+        lead["status"]         = "pending"
+        lead["mode"]           = args.mode
+        lead["outreach_status"] = "pending"
         db.upsert_lead(lead)
 
     print(f"\nAdded {len(new_leads)} new leads to DB ({db.DB_PATH})")
-    print("Run 'python scripts/run_batch.py --mode sg-daily' to analyze them.")
+    print(f"Run: python scripts/run_batch.py --mode {args.mode}")
 
 
 if __name__ == "__main__":
