@@ -455,7 +455,13 @@ To: [Name] <[email]> — [Title]
 Subject: [Direct subject line — no spam words, no "collaboration"]
 ---
 [Email body — peer-to-peer, insider tone. 3 bulleted hook ideas. Under 120 words total.
-NEVER use "collaboration", "hidden gems", or numerical distances.
+Rules:
+- Short sentences. Max 12 words each. Break long thoughts into two sentences.
+- ZERO em dashes (—). Use a period or comma instead.
+- No AI-sounding openers ("I hope", "I wanted to reach out", "I came across").
+- Start with a specific observation about them, not about yourself.
+- No filler words: "truly", "really", "excited", "thrilled", "leverage", "synergy".
+- NEVER use: "collaboration", "hidden gems", or numerical distances.
 End with: "Are you free for a 10-minute call?"]
 ---
 
@@ -537,9 +543,13 @@ End with: "Are you free for a 10-minute call?"]
 
 TONE RULES (never break these):
 - Peer-to-peer, strategic, insider. Never corporate or grovelling.
-- Never use: "collaboration", "hidden gems", "synergy", numerical distances (km/miles)
+- Short sentences throughout. If a sentence exceeds 15 words, split it.
+- Zero em dashes (—) anywhere in the output. Use commas or periods instead.
+- Never use: "collaboration", "hidden gems", "synergy", "leverage", "thrilled", "excited", numerical distances (km/miles)
+- Never use AI-sounding openers: "I hope this finds you", "I wanted to reach out", "I came across your"
 - Always use: time-based proximity ("40 mins away"), specific numbers, insider language
 - CTAs must be low-friction: "Are you free for a 10-minute call?" not "Please consider our proposal"
+- The email must read like it was typed by a real person in under 2 minutes, not polished by AI
 """
 
 

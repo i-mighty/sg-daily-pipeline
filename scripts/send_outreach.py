@@ -57,6 +57,9 @@ def build_outreach_email(lead: dict) -> dict | None:
     if not to_email or "@" not in to_email or not body:
         return None
 
+    # Strip em dashes regardless of what the model generated
+    body = body.replace("—", ",").replace("–", "-")
+
     if cta and cta not in body:
         body = f"{body}\n\n{cta}"
 
