@@ -1,7 +1,20 @@
+import importlib.util
+from pathlib import Path
+
 import streamlit as st
 
 import db
 from utils import stream_script
+
+# Lazy-load seed_sg_daily without requiring scripts/ to be a package
+def _load_seed_module():
+    spec = importlib.util.spec_from_file_location(
+        "seed_sg_daily",
+        Path(__file__).parent.parent / "scripts" / "seed_sg_daily.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 st.set_page_config(page_title="Modes", page_icon="⚙️", layout="wide")
 
@@ -23,6 +36,16 @@ if "running_mode" not in st.session_state:
 # ── Load modes ────────────────────────────────────────────────────────────────
 
 modes = db.get_modes()
+
+# ── SG Daily quick-install ────────────────────────────────────────────────────
+
+if not db.get_mode("sg-daily"):
+    with st.info("**SG Daily mode not installed.** Click to seed it from the built-in template.", icon="ℹ️"):
+        if st.button("⚡ Install SG Daily Mode", type="primary"):
+            seed = _load_seed_module()
+            db.upsert_mode(seed.SG_DAILY_MODE)
+            st.success("✅ SG Daily mode installed.")
+            st.rerun()
 
 # ── Mode cards ────────────────────────────────────────────────────────────────
 
