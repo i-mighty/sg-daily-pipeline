@@ -2,5 +2,5 @@
 builder = "nixpacks"
 
 [deploy]
-cronSchedule = "0 0 * * *"
+cronSchedule = "0 6 * * *"
 startCommand = "python scripts/run_pipeline.py"
