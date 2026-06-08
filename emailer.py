@@ -22,7 +22,7 @@ def _cfg() -> tuple[str, int, str, str]:
     host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     port = int(os.environ.get("SMTP_PORT", "587") or "587")
     user = os.environ.get("SMTP_USER", "")
-    pwd  = os.environ.get("SMTP_PASSWORD", "")
+    pwd  = os.environ.get("SMTP_PASSWORD") or os.environ.get("SMTP_PASS", "")
     return host, port, user, pwd
 
 
