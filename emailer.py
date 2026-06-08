@@ -14,8 +14,31 @@ alias in Gmail settings first; otherwise Gmail rewrites it to SMTP_USER.
 
 import os
 import smtplib
+import socket
 import ssl
+from contextlib import contextmanager
 from email.message import EmailMessage
+
+
+@contextmanager
+def _prefer_ipv4():
+    """Force DNS resolution to IPv4 for the duration of the block.
+
+    Railway containers often lack routable IPv6, so connecting to an AAAA
+    address fails with 'Network is unreachable' (errno 101). We keep the
+    hostname for SNI/cert verification and only constrain the address family.
+    """
+    orig = socket.getaddrinfo
+
+    def patched(host, port, family=0, type=0, proto=0, flags=0):
+        res = orig(host, port, socket.AF_INET, type, proto, flags)
+        return res or orig(host, port, family, type, proto, flags)
+
+    socket.getaddrinfo = patched
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = orig
 
 
 def _cfg() -> tuple[str, int, str, str]:
@@ -60,15 +83,16 @@ def send_email(to, subject: str, *, html: str | None = None, text: str | None = 
         msg.add_attachment(content, maintype="application", subtype="pdf", filename=filename)
 
     context = ssl.create_default_context()
-    if port == 465:
-        with smtplib.SMTP_SSL(host, port, context=context, timeout=30) as s:
-            s.login(user, pwd)
-            s.send_message(msg)
-    else:
-        with smtplib.SMTP(host, port, timeout=30) as s:
-            s.ehlo()
-            s.starttls(context=context)
-            s.ehlo()
-            s.login(user, pwd)
-            s.send_message(msg)
+    with _prefer_ipv4():
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, context=context, timeout=30) as s:
+                s.login(user, pwd)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=30) as s:
+                s.ehlo()
+                s.starttls(context=context)
+                s.ehlo()
+                s.login(user, pwd)
+                s.send_message(msg)
     return True
