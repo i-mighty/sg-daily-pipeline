@@ -3,22 +3,19 @@
 Send a daily pipeline report via Resend.
 
 Environment variables required:
-    RESEND_API_KEY  Resend API key
-    EMAIL_TO        recipient address (e.g. dailyasia9@gmail.com)
-    EMAIL_FROM      verified Resend sender address
+    SMTP_USER / SMTP_PASSWORD   Gmail address + App Password (see emailer.py)
+    EMAIL_TO                    recipient address (e.g. dailyasia9@gmail.com)
+    EMAIL_FROM                  From address (defaults to SMTP_USER)
 
 Usage:
     python scripts/send_report.py
     python scripts/send_report.py --run-id 3   # attach stats from a specific pipeline run
 """
 
-import base64
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
-
-import resend
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -27,6 +24,7 @@ from dotenv import load_dotenv
 load_dotenv(BASE_DIR / ".env")
 
 import db  # noqa: E402
+from emailer import email_configured, send_email  # noqa: E402
 
 
 # ── HTML template ─────────────────────────────────────────────────────────────
@@ -237,15 +235,11 @@ def build_html(run_stats: dict | None = None) -> str:
 def send(run_stats: dict | None = None, mode: str = "sg-daily"):
     import json
 
-    api_key   = os.environ.get("RESEND_API_KEY", "")
-    to_addr   = os.environ.get("EMAIL_TO", "")
-    from_addr = os.environ.get("EMAIL_FROM", "")
+    to_addr = os.environ.get("EMAIL_TO", "")
 
-    if not all([api_key, to_addr, from_addr]):
-        print("ERROR: RESEND_API_KEY, EMAIL_TO, and EMAIL_FROM must be set.")
+    if not to_addr or not email_configured():
+        print("ERROR: EMAIL_TO, SMTP_USER, and SMTP_PASSWORD must be set.")
         return False
-
-    resend.api_key = api_key
 
     mode_config = db.get_mode(mode)
     mode_label  = mode_config["label"] if mode_config else mode
@@ -272,10 +266,7 @@ def send(run_stats: dict | None = None, mode: str = "sg-daily"):
                 continue
             try:
                 safe_name = (lead.get("company_name") or "prospect").replace(" ", "-")
-                attachments.append({
-                    "filename": f"{safe_name}-analysis.pdf",
-                    "content":  list(pdf_path.read_bytes()),
-                })
+                attachments.append((f"{safe_name}-analysis.pdf", pdf_path.read_bytes()))
             except Exception as e:
                 print(f"  Could not attach PDF for {lead.get('company_name')}: {e}")
 
@@ -283,16 +274,10 @@ def send(run_stats: dict | None = None, mode: str = "sg-daily"):
         print(f"Attaching {len(attachments)} PDF report(s)")
 
     try:
-        params = {
-            "from":    f"{mode_label} Pipeline <{from_addr}>",
-            "to":      [to_addr],
-            "subject": subject,
-            "html":    html,
-        }
-        if attachments:
-            params["attachments"] = attachments
-
-        resend.Emails.send(params)
+        send_email(
+            to_addr, subject,
+            html=html, attachments=attachments, from_name=f"{mode_label} Pipeline",
+        )
         print(f"Report sent to {to_addr} ({len(attachments)} PDFs attached)")
         return True
     except Exception as e:

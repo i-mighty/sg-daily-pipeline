@@ -2,9 +2,9 @@
 """
 Send personalised outreach emails to today's queued prospects via Resend.
 
-Env vars:
-    RESEND_API_KEY   Resend API key
-    EMAIL_FROM       Verified Resend sender address (e.g. outreach@yourdomain.com)
+Env vars (SMTP — see emailer.py):
+    SMTP_USER / SMTP_PASSWORD   Gmail address + App Password
+    EMAIL_FROM                  From address (defaults to SMTP_USER)
 
 Usage:
     python scripts/send_outreach.py              # send today's queue
@@ -14,13 +14,10 @@ Usage:
 
 import argparse
 import json
-import os
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-
-import resend
 
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -29,6 +26,7 @@ from dotenv import load_dotenv
 load_dotenv(BASE_DIR / ".env")
 
 import db  # noqa: E402
+from emailer import email_configured, send_email  # noqa: E402
 
 
 def build_outreach_email(lead: dict) -> dict | None:
@@ -76,14 +74,9 @@ def build_outreach_email(lead: dict) -> dict | None:
 
 def send_outreach(date_str: str, dry_run: bool = False, mode: str = "sg-daily") -> list[dict]:
     """Send outreach emails for the given date's queue. Returns results list."""
-    api_key   = os.environ.get("RESEND_API_KEY", "")
-    from_addr = os.environ.get("EMAIL_FROM", "")
-
-    if not api_key or not from_addr:
-        print("ERROR: RESEND_API_KEY and EMAIL_FROM must be set.")
+    if not email_configured():
+        print("ERROR: SMTP_USER and SMTP_PASSWORD must be set.")
         return []
-
-    resend.api_key = api_key
 
     queue_entry = db.get_queue(date_str, mode=mode)
     if not queue_entry:
@@ -147,13 +140,10 @@ def send_outreach(date_str: str, dry_run: bool = False, mode: str = "sg-daily") 
                 f'line-height:1.6;color:#222">{html_body}</body></html>'
             )
 
-            resend.Emails.send({
-                "from":    f"{from_name} <{from_addr}>",
-                "to":      [to_field],
-                "subject": outreach["subject"],
-                "text":    outreach["body"],
-                "html":    html,
-            })
+            send_email(
+                to_field, outreach["subject"],
+                html=html, text=outreach["body"], from_name=from_name,
+            )
 
             db.mark_outreach_sent(lead["url"], "sent")
             print(f"          ✓ Sent")
