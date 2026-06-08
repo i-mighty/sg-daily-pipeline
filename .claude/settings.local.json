@@ -14,7 +14,8 @@
       "Bash(python3 -c ' *)",
       "Bash(pkill -f streamlit)",
       "Read(//tmp/**)",
-      "WebFetch(domain:docs.railway.com)"
+      "WebFetch(domain:docs.railway.com)",
+      "mcp__railway__list_services"
     ]
   }
 }
