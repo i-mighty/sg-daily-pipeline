@@ -1,20 +1,47 @@
-"""SQLite database layer for the AI Sales pipeline."""
+"""PostgreSQL database layer for the AI Sales pipeline.
+
+Drop-in replacement for the previous SQLite layer — same public function API,
+single-tenant. Both the web dashboard and the cron worker share one database,
+which is why this moved off a per-service SQLite volume.
+
+Env:
+  DATABASE_URL — Postgres connection string (Railway provides this; both the
+                 web and cron services reference ${{Postgres.DATABASE_URL}}).
+"""
 
 import json
 import os
-import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
+
+import psycopg2
+import psycopg2.extras
 
 BASE_DIR = Path(__file__).parent
 
-# DB_PATH: /data/pipeline.db on Railway (persistent volume), data/pipeline.db locally
-_default_db = BASE_DIR / "data" / "pipeline.db"
-DB_PATH = Path(os.environ.get("DB_PATH", str(_default_db)))
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+
+
+def _display_url(url: str) -> str:
+    """Credential-free connection string for log messages."""
+    if not url:
+        return "<no DATABASE_URL>"
+    try:
+        p = urlparse(url)
+        return f"postgres://{p.hostname}:{p.port or 5432}{p.path}"
+    except Exception:
+        return "postgres"
+
+
+# Kept for backward-compat with callers that print db.DB_PATH (e.g. discover_leads).
+DB_PATH = _display_url(DATABASE_URL)
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS modes (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     name             TEXT    UNIQUE NOT NULL,
     label            TEXT    NOT NULL,
     description      TEXT    DEFAULT '',
@@ -23,12 +50,12 @@ CREATE TABLE IF NOT EXISTS modes (
     discover_count   INTEGER DEFAULT 5,
     queue_size       INTEGER DEFAULT 8,
     is_active        INTEGER DEFAULT 1,
-    created_at       TEXT    DEFAULT (datetime('now')),
-    updated_at       TEXT    DEFAULT (datetime('now'))
+    created_at       TEXT    DEFAULT (now()::text),
+    updated_at       TEXT    DEFAULT (now()::text)
 );
 
 CREATE TABLE IF NOT EXISTS leads (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    id               SERIAL PRIMARY KEY,
     url              TEXT    UNIQUE NOT NULL,
     company_name     TEXT,
     priority         TEXT    DEFAULT 'medium',
@@ -51,12 +78,12 @@ CREATE TABLE IF NOT EXISTS leads (
     output_folder    TEXT,
     error_message    TEXT,
     analysis_json    TEXT,
-    created_at       TEXT    DEFAULT (datetime('now')),
-    updated_at       TEXT    DEFAULT (datetime('now'))
+    created_at       TEXT    DEFAULT (now()::text),
+    updated_at       TEXT    DEFAULT (now()::text)
 );
 
 CREATE TABLE IF NOT EXISTS pipeline_runs (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    id           SERIAL PRIMARY KEY,
     run_type     TEXT,
     started_at   TEXT,
     completed_at TEXT,
@@ -68,61 +95,78 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
 );
 
 CREATE TABLE IF NOT EXISTS queue_entries (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    id         SERIAL PRIMARY KEY,
     run_date   TEXT    NOT NULL,
+    mode       TEXT    DEFAULT 'sg-daily',
     queue_json TEXT,
     queue_md   TEXT,
     report_sent INTEGER DEFAULT 0,
-    created_at  TEXT   DEFAULT (datetime('now'))
+    created_at  TEXT   DEFAULT (now()::text)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_run_date_mode ON queue_entries(run_date, mode);
 """
 
 
-def _migrate(conn: sqlite3.Connection):
-    """Apply incremental schema changes to existing databases."""
-    # queue_entries: add mode column and unique index
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(queue_entries)").fetchall()}
-    if "mode" not in cols:
-        conn.execute("ALTER TABLE queue_entries ADD COLUMN mode TEXT DEFAULT 'sg-daily'")
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_run_date_mode "
-        "ON queue_entries(run_date, mode)"
-    )
+@contextmanager
+def get_db():
+    """Yield a psycopg2 connection (RealDictCursor). Commits on success, rolls back on error."""
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not set.")
+    conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
-def _seed_default_modes(conn: sqlite3.Connection):
+def _all(sql: str, params=None) -> list[dict]:
+    with get_db() as conn, conn.cursor() as cur:
+        cur.execute(sql, params or ())
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _one(sql: str, params=None) -> dict | None:
+    with get_db() as conn, conn.cursor() as cur:
+        cur.execute(sql, params or ())
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _exec(sql: str, params=None):
+    with get_db() as conn, conn.cursor() as cur:
+        cur.execute(sql, params or ())
+
+
+def _seed_default_modes():
     """Insert default modes if the table is empty."""
-    count = conn.execute("SELECT COUNT(*) FROM modes").fetchone()[0]
-    if count > 0:
+    if _one("SELECT 1 AS x FROM modes LIMIT 1"):
         return
     try:
         from default_modes import DEFAULT_MODES
     except ImportError:
         return
     for m in DEFAULT_MODES:
-        conn.execute(
-            """INSERT OR IGNORE INTO modes
+        _exec(
+            """INSERT INTO modes
                (name, label, description, analysis_prompt, discovery_prompt,
                 discover_count, queue_size, is_active)
-               VALUES (:name,:label,:description,:analysis_prompt,:discovery_prompt,
-                       :discover_count,:queue_size,:is_active)""",
+               VALUES (%(name)s,%(label)s,%(description)s,%(analysis_prompt)s,
+                       %(discovery_prompt)s,%(discover_count)s,%(queue_size)s,%(is_active)s)
+               ON CONFLICT(name) DO NOTHING""",
             m,
         )
 
 
-def get_db() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
 def init_db():
-    with get_db() as conn:
-        conn.executescript(SCHEMA)
-        _migrate(conn)
-        _seed_default_modes(conn)
+    """Create tables (idempotent) and seed default modes if empty."""
+    with get_db() as conn, conn.cursor() as cur:
+        cur.execute(SCHEMA)
+    _seed_default_modes()
 
 
 # ── Mode CRUD ─────────────────────────────────────────────────────────────────
@@ -132,15 +176,11 @@ def get_modes(active_only: bool = False) -> list[dict]:
     if active_only:
         sql += " WHERE is_active=1"
     sql += " ORDER BY id ASC"
-    with get_db() as conn:
-        rows = conn.execute(sql).fetchall()
-    return [dict(r) for r in rows]
+    return _all(sql)
 
 
 def get_mode(name: str) -> dict | None:
-    with get_db() as conn:
-        row = conn.execute("SELECT * FROM modes WHERE name=?", (name,)).fetchone()
-    return dict(row) if row else None
+    return _one("SELECT * FROM modes WHERE name=%s", (name,))
 
 
 def upsert_mode(mode: dict):
@@ -148,20 +188,18 @@ def upsert_mode(mode: dict):
               "discover_count", "queue_size", "is_active"]
     row = {f: mode.get(f) for f in fields}
     row["updated_at"] = datetime.now().isoformat()
-    update = ", ".join(f"{k}=excluded.{k}" for k in row if k != "name")
     cols   = ", ".join(row.keys())
-    params = ", ".join(f":{k}" for k in row.keys())
-    with get_db() as conn:
-        conn.execute(
-            f"INSERT INTO modes ({cols}) VALUES ({params}) "
-            f"ON CONFLICT(name) DO UPDATE SET {update}",
-            row,
-        )
+    params = ", ".join(f"%({k})s" for k in row.keys())
+    update = ", ".join(f"{k}=EXCLUDED.{k}" for k in row if k != "name")
+    _exec(
+        f"INSERT INTO modes ({cols}) VALUES ({params}) "
+        f"ON CONFLICT(name) DO UPDATE SET {update}",
+        row,
+    )
 
 
 def delete_mode(name: str):
-    with get_db() as conn:
-        conn.execute("DELETE FROM modes WHERE name=?", (name,))
+    _exec("DELETE FROM modes WHERE name=%s", (name,))
 
 
 # ── Lead CRUD ─────────────────────────────────────────────────────────────────
@@ -180,15 +218,14 @@ def upsert_lead(lead: dict):
     row["updated_at"] = datetime.now().isoformat()
 
     cols   = ", ".join(row.keys())
-    params = ", ".join(f":{k}" for k in row.keys())
-    update = ", ".join(f"{k}=excluded.{k}" for k in row.keys() if k != "url")
+    params = ", ".join(f"%({k})s" for k in row.keys())
+    update = ", ".join(f"{k}=EXCLUDED.{k}" for k in row.keys() if k != "url")
 
-    sql = f"""
-        INSERT INTO leads ({cols}) VALUES ({params})
-        ON CONFLICT(url) DO UPDATE SET {update}
-    """
-    with get_db() as conn:
-        conn.execute(sql, row)
+    _exec(
+        f"INSERT INTO leads ({cols}) VALUES ({params}) "
+        f"ON CONFLICT(url) DO UPDATE SET {update}",
+        row,
+    )
 
 
 def get_leads(status: str | None = None, mode: str | None = None) -> list[dict]:
@@ -196,15 +233,13 @@ def get_leads(status: str | None = None, mode: str | None = None) -> list[dict]:
     sql    = "SELECT * FROM leads WHERE 1=1"
     params: list = []
     if status:
-        sql += " AND status=?"
+        sql += " AND status=%s"
         params.append(status)
     if mode:
-        sql += " AND mode=?"
+        sql += " AND mode=%s"
         params.append(mode)
     sql += " ORDER BY created_at ASC"
-    with get_db() as conn:
-        rows = conn.execute(sql, params).fetchall()
-    return [dict(r) for r in rows]
+    return _all(sql, params)
 
 
 def get_analyses() -> list[dict]:
@@ -213,23 +248,19 @@ def get_analyses() -> list[dict]:
     sorted by prospect_score descending. Adds _slug/_md_path/_pdf_path
     to keep Streamlit pages working without changes.
     """
-    sql = """
-        SELECT * FROM leads
-        WHERE analysis_json IS NOT NULL AND status='done'
-        ORDER BY prospect_score DESC NULLS LAST
-    """
-    with get_db() as conn:
-        rows = conn.execute(sql).fetchall()
+    rows = _all(
+        "SELECT * FROM leads "
+        "WHERE analysis_json IS NOT NULL AND status='done' "
+        "ORDER BY prospect_score DESC NULLS LAST"
+    )
 
     results = []
-    for r in rows:
-        d = dict(r)
+    for d in rows:
         try:
             analysis = json.loads(d["analysis_json"])
         except Exception:
             analysis = {}
         analysis.update({k: d[k] for k in d if k not in analysis or d[k] is not None})
-        # Restore file path helpers for UI
         folder = d.get("output_folder") or ""
         analysis["_slug"]     = Path(folder).name if folder else ""
         analysis["_md_path"]  = str(Path(folder) / "PROSPECT-ANALYSIS.md") if folder else ""
@@ -239,84 +270,70 @@ def get_analyses() -> list[dict]:
 
 
 def get_existing_urls() -> set[str]:
-    with get_db() as conn:
-        rows = conn.execute("SELECT url FROM leads").fetchall()
-    return {r["url"].strip().lower() for r in rows}
+    return {r["url"].strip().lower() for r in _all("SELECT url FROM leads")}
 
 
 def mark_outreach_sent(url: str, status: str = "sent"):
-    with get_db() as conn:
-        conn.execute(
-            "UPDATE leads SET outreach_status=?, outreach_sent_date=?, updated_at=? WHERE url=?",
-            (status, datetime.now().strftime("%Y-%m-%d"), datetime.now().isoformat(), url),
-        )
+    _exec(
+        "UPDATE leads SET outreach_status=%s, outreach_sent_date=%s, updated_at=%s WHERE url=%s",
+        (status, datetime.now().strftime("%Y-%m-%d"), datetime.now().isoformat(), url),
+    )
 
 
 # ── Pipeline run logging ──────────────────────────────────────────────────────
 
 def start_pipeline_run(run_type: str = "cron") -> int:
-    with get_db() as conn:
-        cur = conn.execute(
-            "INSERT INTO pipeline_runs (run_type, started_at, status) VALUES (?, ?, 'running')",
+    with get_db() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO pipeline_runs (run_type, started_at, status) "
+            "VALUES (%s, %s, 'running') RETURNING id",
             (run_type, datetime.now().isoformat()),
         )
-        return cur.lastrowid
+        return cur.fetchone()["id"]
 
 
 def finish_pipeline_run(run_id: int, discovered: int, analyzed: int,
-                         queued: int, status: str = "completed", error_log: str = ""):
-    with get_db() as conn:
-        conn.execute(
-            """UPDATE pipeline_runs
-               SET completed_at=?, discovered=?, analyzed=?, queued=?,
-                   status=?, error_log=?
-               WHERE id=?""",
-            (datetime.now().isoformat(), discovered, analyzed, queued,
-             status, error_log, run_id),
-        )
+                        queued: int, status: str = "completed", error_log: str = ""):
+    _exec(
+        """UPDATE pipeline_runs
+           SET completed_at=%s, discovered=%s, analyzed=%s, queued=%s,
+               status=%s, error_log=%s
+           WHERE id=%s""",
+        (datetime.now().isoformat(), discovered, analyzed, queued,
+         status, error_log, run_id),
+    )
 
 
 def get_pipeline_runs(limit: int = 30) -> list[dict]:
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM pipeline_runs ORDER BY started_at DESC LIMIT ?", (limit,)
-        ).fetchall()
-    return [dict(r) for r in rows]
+    return _all("SELECT * FROM pipeline_runs ORDER BY started_at DESC LIMIT %s", (limit,))
 
 
 # ── Queue entries ─────────────────────────────────────────────────────────────
 
 def save_queue(run_date: str, queue_json: list, queue_md: str, mode: str = "sg-daily"):
-    with get_db() as conn:
-        conn.execute(
-            """INSERT INTO queue_entries (run_date, queue_json, queue_md, mode)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(run_date, mode) DO UPDATE SET
-                   queue_json=excluded.queue_json,
-                   queue_md=excluded.queue_md""",
-            (run_date, json.dumps(queue_json), queue_md, mode),
-        )
+    _exec(
+        """INSERT INTO queue_entries (run_date, queue_json, queue_md, mode)
+           VALUES (%s, %s, %s, %s)
+           ON CONFLICT(run_date, mode) DO UPDATE SET
+               queue_json=EXCLUDED.queue_json,
+               queue_md=EXCLUDED.queue_md""",
+        (run_date, json.dumps(queue_json), queue_md, mode),
+    )
 
 
 def get_queue(run_date: str, mode: str = "sg-daily") -> dict | None:
-    with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM queue_entries WHERE run_date=? AND mode=? ORDER BY id DESC LIMIT 1",
-            (run_date, mode),
-        ).fetchone()
-    return dict(row) if row else None
+    return _one(
+        "SELECT * FROM queue_entries WHERE run_date=%s AND mode=%s ORDER BY id DESC LIMIT 1",
+        (run_date, mode),
+    )
 
 
 def get_all_queues(run_date: str) -> list[dict]:
     """Return all mode queues for a given date."""
-    with get_db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM queue_entries WHERE run_date=? ORDER BY mode ASC",
-            (run_date,),
-        ).fetchall()
-    return [dict(r) for r in rows]
+    return _all("SELECT * FROM queue_entries WHERE run_date=%s ORDER BY mode ASC", (run_date,))
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 
-init_db()
+if DATABASE_URL:
+    init_db()
