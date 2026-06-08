@@ -1,17 +1,19 @@
-"""Minimal SMTP email sender — works with Gmail SMTP using an App Password.
+"""Email sender with two backends.
 
-Env vars:
-    SMTP_HOST      default smtp.gmail.com
-    SMTP_PORT      default 587 (STARTTLS); use 465 for implicit SSL
-    SMTP_USER      the full Gmail address you authenticate as
-    SMTP_PASSWORD  a Google "App Password" (16 chars, requires 2-Step Verification)
-    EMAIL_FROM     From address (defaults to SMTP_USER)
+Primary: Gmail API over HTTPS (works on Railway, which blocks outbound SMTP).
+Sends as the authenticated Workspace user (e.g. business@viralasia.co) — no
+domain DNS verification needed. Configure with:
+    GMAIL_CLIENT_ID
+    GMAIL_CLIENT_SECRET
+    GMAIL_REFRESH_TOKEN     (mint once via scripts/gmail_oauth_setup.py)
+    EMAIL_FROM              From address (defaults to GMAIL_SENDER / SMTP_USER)
 
-Gmail note: the From address is normally the authenticated account. To send as a
-different address (e.g. business@viralasia.co), add it as a verified "Send mail as"
-alias in Gmail settings first; otherwise Gmail rewrites it to SMTP_USER.
+Fallback: SMTP (for local/dev where SMTP isn't blocked). Configure with:
+    SMTP_HOST (default smtp.gmail.com), SMTP_PORT (587), SMTP_USER,
+    SMTP_PASSWORD / SMTP_PASS (Google App Password).
 """
 
+import base64
 import os
 import smtplib
 import socket
@@ -49,10 +51,49 @@ def _cfg() -> tuple[str, int, str, str]:
     return host, port, user, pwd
 
 
+def _gmail_configured() -> bool:
+    return all(os.environ.get(k) for k in
+               ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN"))
+
+
 def email_configured() -> bool:
-    """True if SMTP credentials are present."""
+    """True if either the Gmail API or SMTP backend is configured."""
+    if _gmail_configured():
+        return True
     _, _, user, pwd = _cfg()
     return bool(user and pwd)
+
+
+def _gmail_access_token() -> str:
+    import requests
+    r = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id":     os.environ["GMAIL_CLIENT_ID"],
+            "client_secret": os.environ["GMAIL_CLIENT_SECRET"],
+            "refresh_token": os.environ["GMAIL_REFRESH_TOKEN"],
+            "grant_type":    "refresh_token",
+        },
+        timeout=30,
+    )
+    if r.status_code != 200:
+        raise RuntimeError(f"Gmail token refresh failed ({r.status_code}): {r.text[:200]}")
+    return r.json()["access_token"]
+
+
+def _send_gmail_api(msg: EmailMessage) -> bool:
+    import requests
+    token = _gmail_access_token()
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    r = requests.post(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"raw": raw},
+        timeout=30,
+    )
+    if r.status_code not in (200, 202):
+        raise RuntimeError(f"Gmail send failed ({r.status_code}): {r.text[:300]}")
+    return True
 
 
 def send_email(to, subject: str, *, html: str | None = None, text: str | None = None,
@@ -63,11 +104,13 @@ def send_email(to, subject: str, *, html: str | None = None, text: str | None = 
     to           — address string ("Name <a@b.com>" or "a@b.com") or list of them.
     attachments  — list of (filename, bytes) PDF attachments.
     """
+    use_gmail = _gmail_configured()
     host, port, user, pwd = _cfg()
-    if not user or not pwd:
-        raise RuntimeError("SMTP_USER and SMTP_PASSWORD must be set.")
+    if not use_gmail and (not user or not pwd):
+        raise RuntimeError("Configure the Gmail API (GMAIL_*) or SMTP (SMTP_USER/SMTP_PASS).")
 
-    from_addr = from_addr or os.environ.get("EMAIL_FROM") or user
+    from_addr = (from_addr or os.environ.get("EMAIL_FROM")
+                 or os.environ.get("GMAIL_SENDER") or user)
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -81,6 +124,10 @@ def send_email(to, subject: str, *, html: str | None = None, text: str | None = 
 
     for filename, content in (attachments or []):
         msg.add_attachment(content, maintype="application", subtype="pdf", filename=filename)
+
+    # Gmail API (HTTPS) — preferred; SMTP is blocked on Railway.
+    if use_gmail:
+        return _send_gmail_api(msg)
 
     context = ssl.create_default_context()
     with _prefer_ipv4():
