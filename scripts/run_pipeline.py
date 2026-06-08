@@ -181,7 +181,11 @@ def main():
     else:
         modes = db.get_modes(active_only=True)
         if not modes:
-            sys.exit("No active modes in DB. Add a mode via the Modes page or enable an existing one.")
+            # Nothing to do is not an error — exit cleanly so the cron isn't marked "Crashed".
+            print("No active modes in DB. Add a mode via the Modes page or enable an existing one.")
+            db.finish_pipeline_run(run_id, discovered=0, analyzed=0, queued=0,
+                                   status="completed", error_log="")
+            return
 
     print(f"Modes to run: {', '.join(m['name'] for m in modes)}\n")
 

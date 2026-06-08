@@ -17,7 +17,6 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-import anthropic
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -27,8 +26,9 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 BASE_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(BASE_DIR))
 import db  # noqa: E402
+from providers import resolve_model, run_agentic_loop, require_api_key  # noqa: E402
 
-MODEL          = "claude-haiku-4-5-20251001"
+MODEL_TIER     = "fast"   # mapped to the active provider's model (see providers/)
 MAX_TOKENS     = 3000
 MAX_TOOL_CALLS = 15
 
@@ -101,12 +101,12 @@ TOOLS = [
     {
         "name": "fetch_url",
         "description": "Fetch text content from a URL.",
-        "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+        "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     },
     {
         "name": "web_search",
         "description": "Search the web for companies, news, and intelligence.",
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "query":       {"type": "string"},
@@ -122,51 +122,18 @@ TOOLS = [
 async def discover(num_leads: int, discovery_prompt: str, mode_name: str) -> list[dict]:
     prompt = discovery_prompt.replace("{NUM_LEADS}", str(num_leads))
 
-    client    = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    messages  = [{"role": "user", "content": prompt}]
-    full_text = ""
-
     print(f"Scouting {num_leads} leads for mode '{mode_name}'...")
-    print(f"Model: {MODEL}  |  Tool call cap: {MAX_TOOL_CALLS}")
+    print(f"Model: {resolve_model(MODEL_TIER)}  |  Tool call cap: {MAX_TOOL_CALLS}")
 
-    tool_call_n = 0
+    def _log_tool(name: str, inputs: dict, n: int) -> None:
+        print(f"  [{n}/{MAX_TOOL_CALLS}] [{name}] {str(inputs)[:80]}")
 
-    while True:
-        response = await client.messages.create(
-            model=MODEL, max_tokens=MAX_TOKENS, tools=TOOLS, messages=messages,
-        )
-
-        for block in response.content:
-            if hasattr(block, "text"):
-                full_text += block.text
-
-        if response.stop_reason != "tool_use":
-            break
-
-        tool_results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                tool_call_n += 1
-                print(f"  [{tool_call_n}/{MAX_TOOL_CALLS}] [{block.name}] {str(block.input)[:80]}")
-                result = _execute_tool(block.name, block.input)
-                tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
-
-        messages.append({"role": "assistant", "content": response.content})
-
-        if tool_call_n >= MAX_TOOL_CALLS:
-            messages.append({"role": "user", "content": tool_results + [{
-                "type": "text",
-                "text": "You've done enough research. Output the JSON array now with the brands you've found.",
-            }]})
-            final = await client.messages.create(
-                model=MODEL, max_tokens=MAX_TOKENS, messages=messages
-            )
-            for block in final.content:
-                if hasattr(block, "text"):
-                    full_text += block.text
-            break
-
-        messages.append({"role": "user", "content": tool_results})
+    full_text = await run_agentic_loop(
+        prompt, TOOLS, _execute_tool,
+        tier=MODEL_TIER, max_tokens=MAX_TOKENS, max_tool_calls=MAX_TOOL_CALLS,
+        finish_instruction="You've done enough research. Output the JSON array now with the brands you've found.",
+        on_tool=_log_tool,
+    )
 
     m = re.search(r'```json\s*(\[.*?\])\s*```', full_text, re.DOTALL)
     if not m:
@@ -206,8 +173,7 @@ async def main():
             print(f"  {m['name']:20s}  {m['label']}  [{status}]  discover={m['discover_count']}")
         return
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit("ERROR: ANTHROPIC_API_KEY is not set.")
+    require_api_key()
 
     mode_config = db.get_mode(args.mode)
     if not mode_config:

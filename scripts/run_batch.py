@@ -17,7 +17,8 @@ Modes:
                 Batam Insider narrative, insider-tone outreach with 3 hook ideas
 
 Requirements:
-    ANTHROPIC_API_KEY env var must be set.
+    LLM_PROVIDER selects the backend (openai [default], anthropic, bedrock);
+    the matching API key must be set (OPENAI_API_KEY / ANTHROPIC_API_KEY).
     source .venv/bin/activate
 """
 
@@ -30,7 +31,6 @@ import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
-import anthropic
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -45,10 +45,11 @@ SCRIPTS  = Path(__file__).parent
 
 sys.path.insert(0, str(BASE_DIR))
 import db  # noqa: E402
+from providers import resolve_model, run_agentic_loop, require_api_key  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-MODEL           = "claude-sonnet-4-6"   # ~80% cheaper than Opus; fully capable for research + writing
+MODEL_TIER      = "quality"             # mapped to the active provider's model (see providers/)
 MAX_TOKENS      = 8000                  # full report fits comfortably; Opus-level output not needed
 MAX_TOOL_CALLS  = 20                    # hard cap — prevents runaway search loops
 DEFAULT_CONC    = 3
@@ -137,7 +138,7 @@ def _execute_tool(name: str, inputs: dict) -> str:
     return f"[unknown tool] {name}"
 
 
-# ── Tool schema for Anthropic API ─────────────────────────────────────────────
+# ── Tool schema (provider-neutral) ────────────────────────────────────────────
 
 TOOLS = [
     {
@@ -146,7 +147,7 @@ TOOLS = [
             "Fetch the text content of any web page. Use for: company homepages, about/team/pricing/careers pages, "
             "news articles, LinkedIn profiles, job boards, Crunchbase, etc."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {"url": {"type": "string"}},
             "required": ["url"],
@@ -158,7 +159,7 @@ TOOLS = [
             "Search the web. Use for: finding news, funding announcements, job postings, tech stack signals, "
             "executives, reviews, competitor mentions, and general company intelligence."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "query":       {"type": "string"},
@@ -613,61 +614,6 @@ def _parse_response(text: str, url: str, company_name: str) -> tuple[str, dict]:
     return md, json_data
 
 
-async def _run_agentic_loop(client: anthropic.AsyncAnthropic, prompt: str,
-                            model: str = MODEL, max_tool_calls: int = MAX_TOOL_CALLS) -> str:
-    """Run multi-turn conversation until the model stops calling tools or hits the cap."""
-    messages     = [{"role": "user", "content": prompt}]
-    full_text    = ""
-    tool_call_n  = 0
-
-    while True:
-        response = await client.messages.create(
-            model=model,
-            max_tokens=MAX_TOKENS,
-            tools=TOOLS,
-            messages=messages,
-        )
-
-        for block in response.content:
-            if hasattr(block, "text"):
-                full_text += block.text
-
-        if response.stop_reason != "tool_use":
-            break
-
-        # Execute tool calls
-        tool_results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                tool_call_n += 1
-                result = _execute_tool(block.name, block.input)
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result,
-                })
-
-        messages.append({"role": "assistant", "content": response.content})
-
-        # Hard cap: force the model to write its output with what it has
-        if tool_call_n >= max_tool_calls:
-            messages.append({"role": "user", "content": tool_results + [{
-                "type": "text",
-                "text": "You've completed enough research. Now write your full output using the data gathered."
-            }]})
-            final = await client.messages.create(
-                model=model, max_tokens=MAX_TOKENS, messages=messages
-            )
-            for block in final.content:
-                if hasattr(block, "text"):
-                    full_text += block.text
-            break
-
-        messages.append({"role": "user", "content": tool_results})
-
-    return full_text
-
-
 async def analyze_company(row: dict, semaphore: asyncio.Semaphore,
                           mode_override: str = "") -> dict:
     """Full analysis for one company. Mutates and returns the row."""
@@ -689,9 +635,12 @@ async def analyze_company(row: dict, semaphore: asyncio.Semaphore,
         row["mode"]          = mode
 
         try:
-            client = anthropic.AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
             prompt = _build_prompt(url, company_name, industry, notes, mode, lead_category)
-            full_text = await _run_agentic_loop(client, prompt)
+            full_text = await run_agentic_loop(
+                prompt, TOOLS, _execute_tool,
+                tier=MODEL_TIER, max_tokens=MAX_TOKENS, max_tool_calls=MAX_TOOL_CALLS,
+                finish_instruction="You've completed enough research. Now write your full output using the data gathered.",
+            )
 
             md_content, json_data = _parse_response(full_text, url, company_name)
 
@@ -757,8 +706,7 @@ async def main():
 
     mode_override = args.mode.strip().lower() if args.mode else ""
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit("ERROR: ANTHROPIC_API_KEY is not set.\nSet it with: export ANTHROPIC_API_KEY=sk-ant-...")
+    require_api_key()
 
     RESULTS.mkdir(exist_ok=True)
 
@@ -786,7 +734,7 @@ async def main():
         return
 
     mode_label = mode_override or "generic (per-row)"
-    print(f"\nAnalyzing {len(to_process)} companies  |  mode={mode_label}  |  concurrency={args.concurrency}  |  model={MODEL}\n")
+    print(f"\nAnalyzing {len(to_process)} companies  |  mode={mode_label}  |  concurrency={args.concurrency}  |  model={resolve_model(MODEL_TIER)}\n")
 
     semaphore = asyncio.Semaphore(args.concurrency)
     updated   = await asyncio.gather(*[analyze_company(r, semaphore, mode_override) for r in to_process])
