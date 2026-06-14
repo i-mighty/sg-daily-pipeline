@@ -21,25 +21,41 @@ Each mode dict must contain:
 
 _GENERIC_ANALYSIS = """You are a world-class B2B sales intelligence analyst. Perform a comprehensive prospect analysis.
 
+=== RESEARCH ===
+
 TARGET: {URL}
 COMPANY NAME HINT: {COMPANY_NAME}
 INDUSTRY HINT: {INDUSTRY_HINT}
 ADDITIONAL CONTEXT: {NOTES}
 
-## Phase 1 — Research (use tools extensively, at least 12-15 calls)
+Gather company intelligence (use tools extensively, at least 10-12 calls):
 
 1. Fetch the company homepage
 2. Fetch About, Team/Leadership, Pricing, Careers, Blog pages if they exist
 3. Search: "{COMPANY_NAME} funding news 2024 2025"
-4. Search: "{COMPANY_NAME} CEO CTO CPO leadership team"
-5. Search: "{COMPANY_NAME} technology stack software tools"
-6. Search: "{COMPANY_NAME} competitors alternatives"
-7. Search: "{COMPANY_NAME} job postings hiring" (reveals stack + growth)
-8. Search executives on LinkedIn (names + company)
-9. Search: "{COMPANY_NAME} customer case study testimonials"
-10. Fetch any relevant news articles or press releases found
+4. Search: "{COMPANY_NAME} technology stack software tools"
+5. Search: "{COMPANY_NAME} competitors alternatives"
+6. Search: "{COMPANY_NAME} job postings hiring" (reveals stack + growth)
+7. Search: "{COMPANY_NAME} customer case study testimonials"
+8. Fetch any relevant news articles or press releases found
 
-## Phase 2 — Analysis
+Capture: firmographics (size, stage, industry, HQ, founded), funding, tech stack,
+recent developments, buying signals, current solutions, and competitive gaps.
+
+=== CONTACT ===
+
+Identify the primary decision maker and how to reach them:
+
+1. Search: "{COMPANY_NAME} CEO CTO CPO leadership team"
+2. Search executives on LinkedIn (names + company)
+3. Fetch the Team/Leadership and Contact pages for names, titles, and emails
+4. Confirm the company email pattern from any public address you find
+
+Capture the decision maker's name, title, LinkedIn, a personalization anchor, and
+the email pattern. Follow the platform email-resolution policy in the system prompt
+(find a real address first; derive from the pattern only as a fallback).
+
+=== SCORING ===
 
 Score the company across 5 dimensions (each 0-100):
 
@@ -55,7 +71,7 @@ Prospect Score = Company_Fit*0.25 + Contact_Access*0.20 + Opportunity_Quality*0.
 
 Grades: 90-100=A+(Hot Lead) | 75-89=A(Strong Prospect) | 60-74=B(Qualified Lead) | 40-59=C(Lukewarm) | 0-39=D(Poor Fit)
 
-## Phase 3 — Output
+=== OUTPUT ===
 
 Produce TWO sections in your response:
 
@@ -139,8 +155,8 @@ Subject B: [subject]
     "total": 0
   },
   "key_decision_maker": {
-    "name": "", "title": "", "email_pattern": "", "linkedin": "",
-    "personalization_anchor": ""
+    "name": "", "title": "", "email": "", "email_source": "found|derived",
+    "email_pattern": "", "linkedin": "", "personalization_anchor": ""
   },
   "buying_committee": [
     {"name": "", "title": "", "role": "", "personalization_anchor": ""}

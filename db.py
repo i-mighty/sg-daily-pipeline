@@ -105,6 +105,32 @@ CREATE TABLE IF NOT EXISTS queue_entries (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_run_date_mode ON queue_entries(run_date, mode);
+
+-- OpenAI Batch API orchestration. One analysis run = several rounds (stages);
+-- each round is one batch job. parent_batch_id (a run_id) groups the rounds.
+CREATE TABLE IF NOT EXISTS batches (
+    id              SERIAL PRIMARY KEY,
+    provider        TEXT NOT NULL DEFAULT 'openai',
+    batch_id        TEXT NOT NULL UNIQUE,            -- OpenAI's batch job id
+    status          TEXT NOT NULL DEFAULT 'in_progress', -- in_progress|completed|failed|expired|cancelled|collected
+    stage           TEXT,                            -- research|contact|score|outreach
+    parent_batch_id TEXT,                            -- run_id grouping a run's rounds
+    mode            TEXT,
+    lead_ids        TEXT DEFAULT '[]',               -- JSON array of lead ids in this batch
+    custom_ids      TEXT,                            -- JSON array of request custom_ids
+    input_file_id   TEXT,
+    output_file_id  TEXT,
+    error_file_id   TEXT,
+    created_at      TEXT DEFAULT (now()::text),
+    completed_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_batches_status ON batches(status);
+
+-- Intermediate stage outputs, persisted between batch rounds so a run is resumable.
+-- The final merged result still lands in leads.analysis_json (shape unchanged).
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS dossier_json TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS contact_json TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS score_json   TEXT;
 """
 
 
@@ -269,8 +295,38 @@ def get_analyses() -> list[dict]:
     return results
 
 
-def get_existing_urls() -> set[str]:
-    return {r["url"].strip().lower() for r in _all("SELECT url FROM leads")}
+def canonicalize_url(url: str) -> str:
+    """
+    Normalise a URL for dedup. Drops scheme, leading www, port, query, and
+    fragment, and the trailing slash; lowercases. So these all collapse to one:
+        https://www.acme.com/  http://acme.com  https://acme.com?x=1  ->  "acme.com"
+    Keeps the path so genuinely different pages stay distinct.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = "https://" + raw
+    p    = urlparse(raw.lower())
+    host = p.netloc.split("@")[-1].split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    path = p.path.rstrip("/")
+    return f"{host}{path}" if host else ""
+
+
+def get_existing_urls(mode: str | None = None) -> set[str]:
+    """Canonical URLs already in the DB (optionally scoped to one mode).
+
+    Returns canonicalized keys (see canonicalize_url) so discovery dedup collapses
+    www / scheme / trailing-slash variants to a single entry.
+    """
+    sql    = "SELECT url FROM leads"
+    params: list = []
+    if mode:
+        sql += " WHERE mode=%s"
+        params.append(mode)
+    return {canonicalize_url(r["url"]) for r in _all(sql, params) if r.get("url")}
 
 
 def mark_outreach_sent(url: str, status: str = "sent"):
@@ -278,6 +334,111 @@ def mark_outreach_sent(url: str, status: str = "sent"):
         "UPDATE leads SET outreach_status=%s, outreach_sent_date=%s, updated_at=%s WHERE url=%s",
         (status, datetime.now().strftime("%Y-%m-%d"), datetime.now().isoformat(), url),
     )
+
+
+def get_lead_by_id(lead_id: int) -> dict | None:
+    return _one("SELECT * FROM leads WHERE id=%s", (lead_id,))
+
+
+def get_leads_by_ids(lead_ids: list[int]) -> dict[int, dict]:
+    """Map of {id: lead row} for the given ids (used by the batch collector)."""
+    if not lead_ids:
+        return {}
+    rows = _all("SELECT * FROM leads WHERE id = ANY(%s)", (list(lead_ids),))
+    return {int(r["id"]): r for r in rows}
+
+
+def set_lead_status(lead_ids: list[int], status: str):
+    if not lead_ids:
+        return
+    _exec("UPDATE leads SET status=%s, updated_at=%s WHERE id = ANY(%s)",
+          (status, datetime.now().isoformat(), list(lead_ids)))
+
+
+# ── Staged-analysis intermediate outputs ──────────────────────────────────────
+
+_STAGE_COLUMN = {
+    "research": "dossier_json",
+    "contact":  "contact_json",
+    "score":    "score_json",
+}
+
+
+def save_stage_output(lead_id: int, stage: str, data: dict) -> None:
+    """Persist a pipeline stage's JSON output so later rounds/retries can resume.
+
+    `outreach` has no working column — it is merged straight into analysis_json.
+    """
+    col = _STAGE_COLUMN.get(stage)
+    if col is None:
+        return
+    _exec(f"UPDATE leads SET {col}=%s, updated_at=%s WHERE id=%s",
+          (json.dumps(data), datetime.now().isoformat(), lead_id))
+
+
+def get_stage_outputs(lead_id: int) -> dict:
+    """Return {dossier, contact, score} parsed from the working columns (missing -> {})."""
+    row = _one("SELECT dossier_json, contact_json, score_json FROM leads WHERE id=%s", (lead_id,))
+    if not row:
+        return {}
+    out = {}
+    for key, col in (("dossier", "dossier_json"), ("contact", "contact_json"), ("score", "score_json")):
+        raw = row.get(col)
+        if raw:
+            try:
+                out[key] = json.loads(raw) if isinstance(raw, str) else dict(raw)
+            except (TypeError, ValueError):
+                out[key] = {}
+    return out
+
+
+# ── OpenAI Batch tracking ─────────────────────────────────────────────────────
+
+def record_batch(batch_id: str, stage: str, parent_batch_id: str, mode: str,
+                 lead_ids: list[int], custom_ids: list[str],
+                 input_file_id: str = "", provider: str = "openai") -> None:
+    _exec(
+        """INSERT INTO batches
+           (batch_id, provider, status, stage, parent_batch_id, mode,
+            lead_ids, custom_ids, input_file_id)
+           VALUES (%s,%s,'in_progress',%s,%s,%s,%s,%s,%s)
+           ON CONFLICT(batch_id) DO NOTHING""",
+        (batch_id, provider, stage, parent_batch_id, mode,
+         json.dumps(lead_ids), json.dumps(custom_ids), input_file_id),
+    )
+
+
+def get_active_batches() -> list[dict]:
+    """Batches still in flight (not yet collected or terminally failed)."""
+    return _all("SELECT * FROM batches "
+                "WHERE status NOT IN ('collected','cancelled','expired','failed') "
+                "ORDER BY created_at ASC")
+
+
+def get_batches(limit: int = 100) -> list[dict]:
+    return _all("SELECT * FROM batches ORDER BY created_at DESC LIMIT %s", (limit,))
+
+
+def update_batch_status(batch_id: str, status: str, output_file_id: str = "",
+                        error_file_id: str = "") -> None:
+    completed = datetime.now().isoformat() if status in (
+        "collected", "completed", "failed", "expired", "cancelled") else None
+    _exec(
+        "UPDATE batches SET status=%s, output_file_id=COALESCE(NULLIF(%s,''), output_file_id), "
+        "error_file_id=COALESCE(NULLIF(%s,''), error_file_id), completed_at=COALESCE(%s, completed_at) "
+        "WHERE batch_id=%s",
+        (status, output_file_id, error_file_id, completed, batch_id),
+    )
+
+
+def siblings_collected(parent_batch_id: str, stages: list[str]) -> bool:
+    """True if every named stage of a run has a collected batch (round gate)."""
+    rows = _all(
+        "SELECT DISTINCT stage FROM batches "
+        "WHERE parent_batch_id=%s AND stage = ANY(%s) AND status='collected'",
+        (parent_batch_id, list(stages)),
+    )
+    return {r["stage"] for r in rows} >= set(stages)
 
 
 # ── Pipeline run logging ──────────────────────────────────────────────────────

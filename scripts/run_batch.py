@@ -45,7 +45,10 @@ SCRIPTS  = Path(__file__).parent
 
 sys.path.insert(0, str(BASE_DIR))
 import db  # noqa: E402
-from providers import resolve_model, run_agentic_loop, require_api_key  # noqa: E402
+import research_tools  # noqa: E402
+from providers import resolve_model, run_agentic_loop, complete, require_api_key  # noqa: E402
+from analysis_pipeline import build_stage_prompt, merge_outputs, render_report_md  # noqa: E402
+from analysis_scaffold import has_sections  # noqa: E402
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -614,6 +617,84 @@ def _parse_response(text: str, url: str, company_name: str) -> tuple[str, dict]:
     return md, json_data
 
 
+def _extract_json(text: str) -> dict:
+    """Tolerantly pull a single JSON object out of a model response.
+
+    Handles ```json fences, leading prose, and trailing commentary by taking the
+    first balanced {...} span. Returns {} if nothing parses.
+    """
+    if not text:
+        return {}
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    candidate = m.group(1) if m else None
+    if candidate is None:
+        start = text.find("{")
+        end   = text.rfind("}")
+        candidate = text[start:end + 1] if start != -1 and end > start else ""
+    try:
+        return json.loads(candidate)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _campaign_prompt(mode: str) -> str:
+    """The active analysis prompt for a mode (DB first, then built-in constants)."""
+    cfg = db.get_mode(mode)
+    if cfg and cfg.get("analysis_prompt", "").strip():
+        return cfg["analysis_prompt"]
+    if mode == "sg-daily":
+        return SG_DAILY_PROMPT
+    return ANALYSIS_PROMPT
+
+
+async def _staged_analyze(row: dict, campaign_prompt: str) -> dict:
+    """Run the 4-stage live pipeline (research -> contact ∥ score -> outreach).
+
+    Returns the merged analysis record (same shape the old single pass produced).
+    All four sub-calls run inside the caller's single semaphore slot, so a
+    concurrency of N stays N leads in flight, not ~4N requests.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    label = row.get("company_name") or row.get("url")
+
+    # ── Stage 1: research (agentic, tools, QUALITY) ─────────────────────────────
+    _, user = build_stage_prompt("research", campaign_prompt, row, today)
+    research_text = await run_agentic_loop(
+        user, TOOLS, _execute_tool,
+        tier="quality", max_tokens=MAX_TOKENS, max_tool_calls=MAX_TOOL_CALLS,
+        finish_instruction="You've done enough research. Output the dossier JSON object now.",
+    )
+    dossier = _extract_json(research_text)
+
+    # ── Stages 2+3: contact ∥ score (no tools, FAST) ────────────────────────────
+    # Targeted decision-maker research for the contact stage (off-site sources beat
+    # the company site for real emails). Blocking I/O -> run off the event loop.
+    dm_research = await asyncio.to_thread(
+        research_tools.enrich_contact, row.get("company_name", "") or row.get("url", ""),
+        row.get("url", ""), dossier,
+    )
+    sys_c, user_c = build_stage_prompt("contact", campaign_prompt, row, today,
+                                       prior={"dossier": dossier}, research_data=dm_research)
+    sys_s, user_s = build_stage_prompt("score", campaign_prompt, row, today,
+                                       prior={"dossier": dossier})
+    contact_text, score_text = await asyncio.gather(
+        complete(user_c, system=sys_c, tier="fast", max_tokens=2000),
+        complete(user_s, system=sys_s, tier="fast", max_tokens=2000),
+    )
+    contact = _extract_json(contact_text)
+    score   = _extract_json(score_text)
+
+    # ── Stage 4: outreach (no tools, QUALITY — email quality matters) ───────────
+    sys_o, user_o = build_stage_prompt("outreach", campaign_prompt, row, today,
+                                       prior={"dossier": dossier, "contact": contact, "score": score})
+    outreach_text = await complete(user_o, system=sys_o, tier="quality", max_tokens=2000)
+    outreach = _extract_json(outreach_text)
+
+    print(f"[stages] {label}: dossier={bool(dossier)} contact={bool(contact)} "
+          f"score={bool(score)} outreach={bool(outreach)}")
+    return merge_outputs(row, dossier, contact, score, outreach)
+
+
 async def analyze_company(row: dict, semaphore: asyncio.Semaphore,
                           mode_override: str = "") -> dict:
     """Full analysis for one company. Mutates and returns the row."""
@@ -635,14 +716,23 @@ async def analyze_company(row: dict, semaphore: asyncio.Semaphore,
         row["mode"]          = mode
 
         try:
-            prompt = _build_prompt(url, company_name, industry, notes, mode, lead_category)
-            full_text = await run_agentic_loop(
-                prompt, TOOLS, _execute_tool,
-                tier=MODEL_TIER, max_tokens=MAX_TOKENS, max_tool_calls=MAX_TOOL_CALLS,
-                finish_instruction="You've completed enough research. Now write your full output using the data gathered.",
-            )
+            campaign_prompt = _campaign_prompt(mode)
 
-            md_content, json_data = _parse_response(full_text, url, company_name)
+            if has_sections(campaign_prompt):
+                # Staged pipeline — sectioned prompt.
+                json_data = await _staged_analyze(row, campaign_prompt)
+                json_data.setdefault("analysis_date", row["analysis_date"])
+                json_data.setdefault("mode", mode)
+                md_content = render_report_md(json_data)
+            else:
+                # Legacy single-pass fallback — un-sectioned prompt, behaves as before.
+                prompt = _build_prompt(url, company_name, industry, notes, mode, lead_category)
+                full_text = await run_agentic_loop(
+                    prompt, TOOLS, _execute_tool,
+                    tier=MODEL_TIER, max_tokens=MAX_TOKENS, max_tool_calls=MAX_TOOL_CALLS,
+                    finish_instruction="You've completed enough research. Now write your full output using the data gathered.",
+                )
+                md_content, json_data = _parse_response(full_text, url, company_name)
 
             # Write output files
             slug    = slugify(json_data.get("company_name") or company_name or "unknown")

@@ -15,10 +15,11 @@ For OpenAI the concrete model per tier is read from env vars
 (OPENAI_QUALITY_MODEL / OPENAI_FAST_MODEL / OPENAI_BATCH_MODEL) with sane defaults.
 
 Public API:
-    from providers import resolve_model, run_agentic_loop
+    from providers import resolve_model, run_agentic_loop, complete
 
     model = resolve_model("quality")                 # provider-correct model ID
     text  = await run_agentic_loop(prompt, TOOLS, execute_tool, tier="quality")
+    text  = await complete(user, system=..., tier="fast")   # one call, no tools
 
 Tools are passed in a provider-neutral shape:
     {"name": str, "description": str, "parameters": <JSON schema dict>}
@@ -30,10 +31,15 @@ import os
 
 # ── Model tiers ───────────────────────────────────────────────────────────────
 
-# OpenAI: (env var, default model)
+# OpenAI: (env var, default model). Balanced quality/cost posture:
+#   quality — gpt-4.1      : live research (agentic) + outreach (email writing)
+#   fast    — gpt-4.1-mini : discovery loop, live contact + score stages
+#   batch   — gpt-4o-mini  : the small batch rounds (contact/score/outreach)
+# The batch *research* round uses OPENAI_BATCH_QUALITY_MODEL (default gpt-4.1) —
+# read directly in scripts/batch_submit.py, since the Batch API has its own model allowlist.
 _OPENAI_TIERS: dict[str, tuple[str, str]] = {
     "quality": ("OPENAI_QUALITY_MODEL", "gpt-4.1"),
-    "fast":    ("OPENAI_FAST_MODEL",    "gpt-4.1-nano"),
+    "fast":    ("OPENAI_FAST_MODEL",    "gpt-4.1-mini"),
     "batch":   ("OPENAI_BATCH_MODEL",   "gpt-4o-mini"),
 }
 
@@ -91,6 +97,41 @@ def require_api_key(provider: str | None = None) -> None:
         raise SystemExit(f"ERROR: {key} is not set (LLM_PROVIDER={p}).")
 
 
+# ── Single-shot completion (no tools) ─────────────────────────────────────────
+
+async def complete(
+    user: str,
+    *,
+    system: str | None = None,
+    tier: str = "fast",
+    max_tokens: int = 4000,
+    provider: str | None = None,
+) -> str:
+    """One LLM call with an optional system prompt; returns the assistant text.
+
+    Used by the staged analysis pipeline for the no-tool stages (contact, score,
+    outreach). For tool-using stages (research/discovery) use run_agentic_loop.
+    """
+    p = (provider or _default_provider()).lower()
+    client = get_async_client(p)
+    model = resolve_model(tier, p)
+    if p == "openai":
+        messages: list = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": user})
+        resp = await client.chat.completions.create(
+            model=model, max_tokens=max_tokens, messages=messages,
+        )
+        return resp.choices[0].message.content or ""
+    kwargs = {"model": model, "max_tokens": max_tokens,
+              "messages": [{"role": "user", "content": user}]}
+    if system:
+        kwargs["system"] = system
+    resp = await client.messages.create(**kwargs)
+    return "".join(b.text for b in resp.content if hasattr(b, "text"))
+
+
 # ── Unified agentic loop ──────────────────────────────────────────────────────
 
 DEFAULT_FINISH = "You've done enough research. Now produce your final output using the data gathered."
@@ -107,6 +148,7 @@ async def run_agentic_loop(
     provider: str | None = None,
     finish_instruction: str = DEFAULT_FINISH,
     on_tool=None,
+    system: str | None = None,
 ) -> str:
     """Run a multi-turn tool-use conversation until the model stops calling tools
     or hits `max_tool_calls`. Returns the concatenated assistant text.
@@ -114,19 +156,21 @@ async def run_agentic_loop(
     `tools`        — provider-neutral list of {name, description, parameters}.
     `execute_tool` — callable(name, inputs_dict) -> str.
     `on_tool`      — optional callable(name, inputs_dict, call_number) for logging.
+    `system`       — optional system prompt applied to every turn.
     """
     p = (provider or _default_provider()).lower()
     client = get_async_client(p)
     model = resolve_model(tier, p)
     if p == "openai":
         return await _openai_loop(client, model, prompt, tools, execute_tool,
-                                  max_tokens, max_tool_calls, finish_instruction, on_tool)
+                                  max_tokens, max_tool_calls, finish_instruction, on_tool, system)
     return await _anthropic_loop(client, model, prompt, tools, execute_tool,
-                                 max_tokens, max_tool_calls, finish_instruction, on_tool)
+                                 max_tokens, max_tool_calls, finish_instruction, on_tool, system)
 
 
 async def _anthropic_loop(client, model, prompt, tools, execute_tool,
-                          max_tokens, max_tool_calls, finish_instruction, on_tool) -> str:
+                          max_tokens, max_tool_calls, finish_instruction, on_tool,
+                          system=None) -> str:
     anth_tools = [
         {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
         for t in tools
@@ -134,10 +178,11 @@ async def _anthropic_loop(client, model, prompt, tools, execute_tool,
     messages: list = [{"role": "user", "content": prompt}]
     full_text = ""
     n = 0
+    _sys = {"system": system} if system else {}
 
     while True:
         resp = await client.messages.create(
-            model=model, max_tokens=max_tokens, tools=anth_tools, messages=messages,
+            model=model, max_tokens=max_tokens, tools=anth_tools, messages=messages, **_sys,
         )
         for block in resp.content:
             if hasattr(block, "text"):
@@ -164,7 +209,7 @@ async def _anthropic_loop(client, model, prompt, tools, execute_tool,
                 {"type": "text", "text": finish_instruction},
             ]})
             final = await client.messages.create(
-                model=model, max_tokens=max_tokens, messages=messages,
+                model=model, max_tokens=max_tokens, messages=messages, **_sys,
             )
             for block in final.content:
                 if hasattr(block, "text"):
@@ -177,14 +222,18 @@ async def _anthropic_loop(client, model, prompt, tools, execute_tool,
 
 
 async def _openai_loop(client, model, prompt, tools, execute_tool,
-                       max_tokens, max_tool_calls, finish_instruction, on_tool) -> str:
+                       max_tokens, max_tool_calls, finish_instruction, on_tool,
+                       system=None) -> str:
     oa_tools = [
         {"type": "function", "function": {
             "name": t["name"], "description": t["description"], "parameters": t["parameters"],
         }}
         for t in tools
     ]
-    messages: list = [{"role": "user", "content": prompt}]
+    messages: list = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
     full_text = ""
     n = 0
 

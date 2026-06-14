@@ -119,8 +119,16 @@ TOOLS = [
 
 # ── Core discovery ─────────────────────────────────────────────────────────────
 
-async def discover(num_leads: int, discovery_prompt: str, mode_name: str) -> list[dict]:
+async def discover(num_leads: int, discovery_prompt: str, mode_name: str,
+                   exclude: list[str] | None = None) -> list[dict]:
     prompt = discovery_prompt.replace("{NUM_LEADS}", str(num_leads))
+
+    if exclude:
+        prompt += (
+            "\n\nALREADY IN THE DATABASE — do not suggest these companies/domains "
+            "again; find different ones:\n"
+            + "\n".join(f"- {d}" for d in exclude)
+        )
 
     print(f"Scouting {num_leads} leads for mode '{mode_name}'...")
     print(f"Model: {resolve_model(MODEL_TIER)}  |  Tool call cap: {MAX_TOOL_CALLS}")
@@ -188,17 +196,42 @@ async def main():
     if not discovery_prompt.strip():
         sys.exit(f"ERROR: Mode '{args.mode}' has no discovery_prompt set.")
 
-    leads = await discover(num_leads, discovery_prompt, args.mode)
+    # Over-fetch with retries: dedup eats into every batch (the model gravitates to
+    # well-known names), so ask for double the shortfall, name the existing companies
+    # as exclusions in the prompt, and go back for more until the quota of NEW leads is
+    # met. Dedup is on canonical URL — against the DB and within the batch itself — so
+    # www / slash / scheme variants collapse to one.
+    seen        = db.get_existing_urls(mode=args.mode)
+    new_leads:  list[dict] = []
+    total_found = 0
+    MAX_ATTEMPTS = 3
 
-    if not leads:
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        shortfall = num_leads - len(new_leads)
+        if shortfall <= 0:
+            break
+        if attempt > 1:
+            print(f"\n[attempt {attempt}/{MAX_ATTEMPTS}] {len(new_leads)}/{num_leads} new so far — scouting again...")
+        leads = await discover(shortfall * 2, discovery_prompt, args.mode,
+                               exclude=sorted(seen)[:120])
+        total_found += len(leads)
+        if not leads:
+            break
+        for l in leads:
+            if len(new_leads) >= num_leads:
+                break
+            canon = db.canonicalize_url(l.get("url", ""))
+            if not canon or canon in seen:
+                continue
+            seen.add(canon)
+            new_leads.append(l)
+
+    if total_found == 0:
         print("No leads found.")
         return
 
-    existing_urls = db.get_existing_urls()
-    new_leads     = [l for l in leads if l.get("url", "").strip().lower() not in existing_urls]
-    dupes         = len(leads) - len(new_leads)
-
-    print(f"\nDiscovered {len(leads)} leads | {dupes} already in DB | {len(new_leads)} new\n")
+    dupes = total_found - len(new_leads)
+    print(f"\nDiscovered {total_found} candidates | {dupes} already in DB / duplicate | {len(new_leads)} new\n")
 
     for lead in new_leads:
         cat = lead.get("lead_category", "")

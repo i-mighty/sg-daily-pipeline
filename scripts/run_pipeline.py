@@ -81,6 +81,13 @@ def run_mode(mode: dict, args: argparse.Namespace, python: str) -> dict:
     print(f"# MODE: {label} ({name})")
     print(f"{'#'*60}")
 
+    # ── Delivery-only pass ────────────────────────────────────────────────────
+    # Used after a batch run's results have been collected: skip discovery +
+    # analysis, just queue / outreach / report over the leads now marked 'done'.
+    if args.deliver:
+        _deliver(name, args, stats)
+        return stats
+
     # ── Step 1: Discover ──────────────────────────────────────────────────────
     discover_count = mode.get("discover_count", 0)
     if discover_count > 0 and not args.dry_run:
@@ -103,6 +110,20 @@ def run_mode(mode: dict, args: argparse.Namespace, python: str) -> dict:
         return stats
 
     # ── Step 2: Analyze ───────────────────────────────────────────────────────
+    if args.analysis_path == "batch":
+        # Async path: submit a batch and stop here. The 15-min batch_collect cron
+        # advances the rounds and finalizes leads; a later `--deliver` pass sends
+        # the queue / outreach / report once results land.
+        code, _ = run_step(
+            f"[{name}] Submit batch (research round)",
+            [python, "scripts/batch_submit.py", "--mode", name],
+        )
+        if code != 0:
+            stats["errors"].append(f"batch_submit exited {code}")
+        print(f"[{name}] Batch submitted — queue/outreach/report deferred to the "
+              f"--deliver pass after collection.")
+        return stats
+
     before_count = len(db.get_analyses())
     code, _ = run_step(
         f"[{name}] Analyze pending leads",
@@ -112,6 +133,14 @@ def run_mode(mode: dict, args: argparse.Namespace, python: str) -> dict:
     if code != 0:
         stats["errors"].append(f"run_batch exited {code}")
     stats["analyzed"] = max(0, len(db.get_analyses()) - before_count)
+
+    _deliver(name, args, stats)
+    return stats
+
+
+def _deliver(name: str, args: argparse.Namespace, stats: dict) -> None:
+    """Steps 3-5: generate queue, send outreach, send report for a mode."""
+    python = sys.executable
 
     # ── Step 3: Generate queue ────────────────────────────────────────────────
     code, _ = run_step(
@@ -154,13 +183,18 @@ def run_mode(mode: dict, args: argparse.Namespace, python: str) -> dict:
             mode=name,
         )
 
-    return stats
-
 
 def main():
     parser = argparse.ArgumentParser(description="Multi-mode end-to-end pipeline")
     parser.add_argument("--mode",        default="",  help="Run only this mode (default: all active modes)")
     parser.add_argument("--concurrency", type=int, default=3, help="Analysis concurrency (default: 3)")
+    parser.add_argument("--analysis-path", choices=["live", "batch"],
+                        default=os.environ.get("ANALYSIS_PATH", "live"),
+                        help="live = synchronous analysis + delivery in this run; "
+                             "batch = submit OpenAI Batch and defer delivery to --deliver (default: env ANALYSIS_PATH or live)")
+    parser.add_argument("--deliver",     action="store_true",
+                        help="Delivery only: skip discovery/analysis, run queue+outreach+report over done leads "
+                             "(use after a batch run's results are collected)")
     parser.add_argument("--no-email",    action="store_true", help="Skip outreach + report emails")
     parser.add_argument("--no-cleanup",  action="store_true", help="Skip deleting result files")
     parser.add_argument("--dry-run",     action="store_true", help="Discover only, no analysis/email")
