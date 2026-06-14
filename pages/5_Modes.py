@@ -16,6 +16,63 @@ def _load_seed_module():
     spec.loader.exec_module(mod)
     return mod
 
+
+# ── Edit form renderer ────────────────────────────────────────────────────────
+# Defined before the render loop below: Streamlit runs this script top-to-bottom,
+# so the loop's call to _render_edit_form needs the name to already exist.
+
+def _render_edit_form(mode: dict):
+    name = mode["name"]
+    with st.form(key=f"form_edit_{name}"):
+        st.markdown("#### Edit Mode")
+
+        fc1, fc2 = st.columns(2)
+        new_label = fc1.text_input("Label (display name)", value=mode["label"])
+        new_desc  = fc2.text_input("Description", value=mode.get("description", ""))
+
+        fs1, fs2, fs3 = st.columns(3)
+        new_discover = fs1.number_input("Discover count / run", min_value=0, max_value=100,
+                                         value=int(mode["discover_count"]))
+        new_queue    = fs2.number_input("Queue size",            min_value=1, max_value=50,
+                                         value=int(mode["queue_size"]))
+        new_active   = fs3.toggle("Active (runs in cron)", value=bool(mode["is_active"]))
+
+        st.markdown("**Discovery Prompt** — uses `{NUM_LEADS}` as the only placeholder")
+        new_discovery = st.text_area(
+            "discovery_prompt", value=mode.get("discovery_prompt", ""),
+            height=300, label_visibility="collapsed",
+            help="Instructs the AI what kinds of companies to find. Use {NUM_LEADS} for the count.",
+        )
+
+        st.markdown("**Analysis Prompt** — placeholders: `{URL}` `{COMPANY_NAME}` `{INDUSTRY_HINT}` `{NOTES}` `{LEAD_CATEGORY}` `{TODAY}`")
+        new_analysis = st.text_area(
+            "analysis_prompt", value=mode.get("analysis_prompt", ""),
+            height=500, label_visibility="collapsed",
+            help="Full system prompt for the analysis agent.",
+        )
+
+        save, cancel = st.columns([1, 5])
+        submitted = save.form_submit_button("💾 Save", type="primary", use_container_width=True)
+        if cancel.form_submit_button("Cancel", use_container_width=True):
+            st.session_state.editing_mode = None
+            st.rerun()
+
+        if submitted:
+            db.upsert_mode({
+                "name":             name,
+                "label":            new_label,
+                "description":      new_desc,
+                "discover_count":   new_discover,
+                "queue_size":       new_queue,
+                "is_active":        1 if new_active else 0,
+                "discovery_prompt": new_discovery,
+                "analysis_prompt":  new_analysis,
+            })
+            st.session_state.editing_mode = None
+            st.success(f"Mode '{name}' saved.")
+            st.rerun()
+
+
 st.set_page_config(page_title="Modes", page_icon="⚙️", layout="wide")
 
 st.title("⚙️ Pipeline Modes")
@@ -135,65 +192,6 @@ else:
             if is_editing:
                 st.divider()
                 _render_edit_form(mode)
-
-
-# ── Edit form renderer ────────────────────────────────────────────────────────
-
-def _render_edit_form(mode: dict):
-    name = mode["name"]
-    with st.form(key=f"form_edit_{name}"):
-        st.markdown("#### Edit Mode")
-
-        fc1, fc2 = st.columns(2)
-        new_label = fc1.text_input("Label (display name)", value=mode["label"])
-        new_desc  = fc2.text_input("Description", value=mode.get("description", ""))
-
-        fs1, fs2, fs3 = st.columns(3)
-        new_discover = fs1.number_input("Discover count / run", min_value=0, max_value=100,
-                                         value=int(mode["discover_count"]))
-        new_queue    = fs2.number_input("Queue size",            min_value=1, max_value=50,
-                                         value=int(mode["queue_size"]))
-        new_active   = fs3.toggle("Active (runs in cron)", value=bool(mode["is_active"]))
-
-        st.markdown("**Discovery Prompt** — uses `{NUM_LEADS}` as the only placeholder")
-        new_discovery = st.text_area(
-            "discovery_prompt", value=mode.get("discovery_prompt", ""),
-            height=300, label_visibility="collapsed",
-            help="Instructs the AI what kinds of companies to find. Use {NUM_LEADS} for the count.",
-        )
-
-        st.markdown("**Analysis Prompt** — placeholders: `{URL}` `{COMPANY_NAME}` `{INDUSTRY_HINT}` `{NOTES}` `{LEAD_CATEGORY}` `{TODAY}`")
-        new_analysis = st.text_area(
-            "analysis_prompt", value=mode.get("analysis_prompt", ""),
-            height=500, label_visibility="collapsed",
-            help="Full system prompt for the analysis agent.",
-        )
-
-        save, cancel = st.columns([1, 5])
-        submitted = save.form_submit_button("💾 Save", type="primary", use_container_width=True)
-        if cancel.form_submit_button("Cancel", use_container_width=True):
-            st.session_state.editing_mode = None
-            st.rerun()
-
-        if submitted:
-            db.upsert_mode({
-                "name":             name,
-                "label":            new_label,
-                "description":      new_desc,
-                "discover_count":   new_discover,
-                "queue_size":       new_queue,
-                "is_active":        1 if new_active else 0,
-                "discovery_prompt": new_discovery,
-                "analysis_prompt":  new_analysis,
-            })
-            st.session_state.editing_mode = None
-            st.success(f"Mode '{name}' saved.")
-            st.rerun()
-
-
-# Streamlit requires functions to be defined before use in forms inside loops;
-# re-render edit forms here now that the function is defined.
-# (The calls inside the loop above work because Python resolves the name at call time.)
 
 
 st.divider()
