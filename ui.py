@@ -50,6 +50,11 @@ def batches(limit: int = 100) -> list[dict]:
         return []  # batches table may not exist on a not-yet-migrated DB
 
 
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def analysis_by_url(url: str) -> dict | None:
+    return db.get_analysis_by_url(url)
+
+
 def clear_caches() -> None:
     st.cache_data.clear()
 
@@ -117,8 +122,14 @@ def status_badge(status: str) -> str:
 
 def render_prospect_detail(a: dict) -> None:
     """Rich, read-only view of one merged analysis record."""
-    dm = a.get("key_decision_maker", {}) or {}
-    em = a.get("outreach_email", {}) or {}
+    # These can arrive as a flattened string (e.g. key_decision_maker = name) when an
+    # older record's columns shadowed the JSON; coerce to dict so .get() is always safe.
+    dm = a.get("key_decision_maker") or {}
+    em = a.get("outreach_email") or {}
+    if not isinstance(dm, dict):
+        dm = {"name": str(dm)}
+    if not isinstance(em, dict):
+        em = {}
 
     st.markdown(
         f"### {a.get('company_name','?')} &nbsp; {score_pill(a.get('prospect_score'))}",
@@ -210,7 +221,11 @@ def prospect_picker(analyses_list: list[dict], key: str = "picker") -> None:
     }
     choice = st.selectbox("Inspect a prospect", list(labels.keys()), key=key)
     if choice:
-        render_prospect_detail(labels[choice])
+        a = labels[choice]
+        if st.button("📄 Open full detail page →", key=f"{key}_open"):
+            st.query_params["url"] = a.get("url", "")
+            st.switch_page("pages/7_Prospect.py")
+        render_prospect_detail(a)
 
 
 # ── Batches panel ──────────────────────────────────────────────────────────────

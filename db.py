@@ -268,6 +268,31 @@ def get_leads(status: str | None = None, mode: str | None = None) -> list[dict]:
     return _all(sql, params)
 
 
+def _merge_lead_analysis(d: dict) -> dict:
+    """Merge one lead row's columns onto its analysis_json into a single record.
+
+    A scalar column must NOT clobber a structured JSON field: the leads table stores
+    flattened mirrors (key_decision_maker = the DM's name string, ooh_presence =
+    "Yes"/"") whose rich form lives in analysis_json as a dict — overwriting would
+    turn key_decision_maker into a bare string and break .get() callers.
+    """
+    try:
+        analysis = json.loads(d["analysis_json"]) if d.get("analysis_json") else {}
+    except Exception:
+        analysis = {}
+    for k, v in d.items():
+        if v is None:
+            continue
+        if isinstance(analysis.get(k), (dict, list)):
+            continue
+        analysis[k] = v
+    folder = d.get("output_folder") or ""
+    analysis["_slug"]     = Path(folder).name if folder else ""
+    analysis["_md_path"]  = str(Path(folder) / "PROSPECT-ANALYSIS.md") if folder else ""
+    analysis["_pdf_path"] = str(Path(folder) / "prospect-analysis.pdf") if folder else ""
+    return analysis
+
+
 def get_analyses() -> list[dict]:
     """
     Return all leads that have a completed analysis_json,
@@ -279,20 +304,18 @@ def get_analyses() -> list[dict]:
         "WHERE analysis_json IS NOT NULL AND status='done' "
         "ORDER BY prospect_score DESC NULLS LAST"
     )
+    return [_merge_lead_analysis(d) for d in rows]
 
-    results = []
-    for d in rows:
-        try:
-            analysis = json.loads(d["analysis_json"])
-        except Exception:
-            analysis = {}
-        analysis.update({k: d[k] for k in d if k not in analysis or d[k] is not None})
-        folder = d.get("output_folder") or ""
-        analysis["_slug"]     = Path(folder).name if folder else ""
-        analysis["_md_path"]  = str(Path(folder) / "PROSPECT-ANALYSIS.md") if folder else ""
-        analysis["_pdf_path"] = str(Path(folder) / "prospect-analysis.pdf") if folder else ""
-        results.append(analysis)
-    return results
+
+def get_lead_by_url(url: str) -> dict | None:
+    """The raw lead row for a URL (discovery fields + analysis_json), or None."""
+    return _one("SELECT * FROM leads WHERE url=%s", (url,))
+
+
+def get_analysis_by_url(url: str) -> dict | None:
+    """Merged discovery + analysis record for one URL (works even pre-analysis)."""
+    d = _one("SELECT * FROM leads WHERE url=%s", (url,))
+    return _merge_lead_analysis(d) if d else None
 
 
 def canonicalize_url(url: str) -> str:

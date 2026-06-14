@@ -105,6 +105,10 @@ lead = filtered[sel_rows[0]]
 sc   = lead.get("prospect_score", 0)
 g    = grade(sc)
 
+if st.button("📄 Open full detail page →", type="primary"):
+    st.query_params["url"] = lead.get("url", "")
+    st.switch_page("pages/7_Prospect.py")
+
 st.divider()
 
 # Header
