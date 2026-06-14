@@ -50,7 +50,11 @@ DOSSIER_SCHEMA = """{
   "buying_signals": [], "current_solutions": [], "competitive_gaps": [],
   "email_pattern": "",
   "candidate_contacts": [{"name": "", "title": "", "source_url": ""}],
-  "sources": []
+  "sources": [],
+  "lead_category": "",
+  "sg_usp": "",
+  "ooh_presence": {"detected": false, "evidence": "", "channels": []},
+  "sg_dollar_filter": {"passes": true, "budget_signal": "", "rationale": ""}
 }"""
 
 CONTACT_SCHEMA = """{
@@ -84,6 +88,7 @@ OUTREACH_SCHEMA = """{
     "to_name": "", "to_title": "", "to_email": "",
     "subject_a": "", "subject_b": "", "body": "", "cta": ""
   },
+  "hook_ideas": [],
   "recommended_action": "",
   "immediate_actions": []
 }"""
@@ -194,7 +199,13 @@ def build_stage_prompt(
             body = sections.get("research", "").strip()
             if body:
                 parts.append(_fill(body, lead, today))
-        parts.append(f"Produce ONLY a JSON object — the research dossier — with this shape:\n```json\n{schema}\n```")
+        parts.append(
+            f"Produce ONLY a JSON object — the research dossier — with this shape:\n```json\n{schema}\n```\n"
+            "The fields lead_category, sg_usp, ooh_presence, and sg_dollar_filter are "
+            "campaign-optional: populate them ONLY if the campaign instructions above ask "
+            "for that classification/USP/OOH/budget analysis; otherwise leave them at their "
+            "empty defaults."
+        )
 
     elif stage == "contact":
         parts.append(_json_block("Research dossier", prior.get("dossier", {})))
@@ -221,10 +232,19 @@ def build_stage_prompt(
         parts.append(_json_block("Research dossier", prior.get("dossier", {})))
         parts.append(_json_block("Decision maker", prior.get("contact", {})))
         parts.append(_json_block("Score", prior.get("score", {})))
+        # The campaign's OUTPUT section (legacy monolithic JSON schema) is intentionally
+        # NOT injected — it competes with OUTREACH_SCHEMA. But an optional OUTREACH section
+        # carries campaign STYLE/TONE (voice, banned words, hook instructions, CTA) with no
+        # competing schema, so inject it here on top of the platform email rules.
+        outreach_body = sections.get("outreach", "").strip()
+        if outreach_body:
+            parts.append("## Campaign outreach style\n\n" + _fill(outreach_body, lead, today))
         parts.append(
             "Using the dossier, decision maker, and score above, write the outreach "
-            "email following the system email-writing rules. Then produce ONLY a JSON "
-            f"object with this shape (no markdown report, no other text):\n```json\n{schema}\n```"
+            "email following the system email-writing rules"
+            + (" and the campaign outreach style above" if outreach_body else "")
+            + ". Then produce ONLY a JSON object with this shape (no markdown report, no "
+            f"other text):\n```json\n{schema}\n```"
         )
 
     return system, "\n\n".join(parts)
@@ -330,6 +350,15 @@ def merge_outputs(
         "buying_signals":    dossier.get("buying_signals", []),
         "current_solutions": dossier.get("current_solutions", []),
         "competitive_gaps":  dossier.get("competitive_gaps", []),
+
+        # Campaign-optional fields (e.g. SG Daily): pass through from the dossier so
+        # downstream (dashboard ooh/usp columns, outreach) keeps them. Empty for
+        # campaigns that don't ask for them.
+        "lead_category":     dossier.get("lead_category") or lead.get("lead_category", ""),
+        "sg_usp":            dossier.get("sg_usp", ""),
+        "ooh_presence":      dossier.get("ooh_presence", {}),
+        "sg_dollar_filter":  dossier.get("sg_dollar_filter", {}),
+        "hook_ideas":        outreach.get("hook_ideas", []),
 
         "outreach_email":     _clean_email(outreach.get("outreach_email", {})),
         "recommended_action": outreach.get("recommended_action", ""),

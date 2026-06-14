@@ -28,7 +28,10 @@ import re
 #
 # Each maps to a stage in the analysis pipeline. Missing sections come back as "".
 
-SECTION_NAMES = ["RESEARCH", "CONTACT", "SCORING", "OUTPUT"]
+# OUTREACH is optional: when present it feeds the outreach stage extra style/tone
+# guidance (banned words, voice, hook instructions, CTA) WITHOUT a competing JSON
+# schema. Absent -> the outreach stage uses only the platform EMAIL_SYSTEM_PROMPT.
+SECTION_NAMES = ["RESEARCH", "CONTACT", "SCORING", "OUTPUT", "OUTREACH"]
 
 _SECTION_RE = re.compile(r"^[ \t]*===[ \t]*([A-Z][A-Z &]*?)[ \t]*===[ \t]*$", re.MULTILINE)
 
@@ -37,7 +40,7 @@ def split_sections(prompt: str) -> dict[str, str]:
     """
     Parse a sectioned campaign prompt into its labelled parts.
 
-    Returns {preamble, research, contact, scoring, output}. The "preamble" is any
+    Returns {preamble, research, contact, scoring, output, outreach}. "preamble" is any
     text before the first === marker (shared product/lens context that every stage
     needs). Keys are always present; absent sections are "".
 
