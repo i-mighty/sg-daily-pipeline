@@ -3,7 +3,6 @@ import streamlit as st
 import db
 from utils import load_prospects, stream_script
 
-st.set_page_config(page_title="Discover Leads", page_icon="🔍", layout="wide")
 
 st.title("🔍 Discover Leads")
 st.caption("Autonomously finds companies matching a mode's discovery prompt and adds them to your pipeline.")

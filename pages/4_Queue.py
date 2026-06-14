@@ -8,7 +8,6 @@ from utils import (dm_email, dm_name, grade_emoji, load_analyses,
                    load_queue_files, mark_outreach_sent, score_emoji,
                    stream_script)
 
-st.set_page_config(page_title="Daily Queue", page_icon="📬", layout="wide")
 
 st.title("📬 Daily Outreach Queue")
 st.caption("Your highest-priority targets for today. Copy, send, mark done.")

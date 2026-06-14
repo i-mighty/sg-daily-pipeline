@@ -3,10 +3,10 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+import ui
 from utils import (dm_email, dm_name, grade, grade_color, grade_emoji,
                    load_analyses, mark_outreach_sent, score_emoji)
 
-st.set_page_config(page_title="Lead Browser", page_icon="🎯", layout="wide")
 
 st.title("🎯 Lead Browser")
 st.caption("Browse, filter, and deep-dive every analyzed lead.")
@@ -78,6 +78,7 @@ for a in filtered:
         "Email":     dm_email(a),
         "Outreach":  a.get("outreach_status") or "pending",
         "Date":      a.get("analysis_date", "—"),
+        "View":      ui.detail_link(a.get("url", "")),
     })
 
 df        = pd.DataFrame(rows)
@@ -90,6 +91,9 @@ selection = st.dataframe(
     column_config={
         "Score": st.column_config.ProgressColumn(
             "Score", min_value=0, max_value=100, format="%d"
+        ),
+        "View": st.column_config.LinkColumn(
+            "View", display_text="Open ↗", help="Open the full prospect detail"
         ),
     },
 )

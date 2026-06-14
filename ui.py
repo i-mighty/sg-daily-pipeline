@@ -15,6 +15,7 @@ db.py / scripts; keep presentation here.
 from __future__ import annotations
 
 import json
+import urllib.parse
 
 import streamlit as st
 
@@ -57,6 +58,15 @@ def analysis_by_url(url: str) -> dict | None:
 
 def clear_caches() -> None:
     st.cache_data.clear()
+
+
+# Deep link to the (hidden) Prospect detail page. Used as a per-row LinkColumn so
+# every lead in a table has a clickable "Open" that routes to /prospect?url=...
+PROSPECT_PAGE_PATH = "prospect"   # must match st.Page(url_path=...) in app.py
+
+
+def detail_link(url: str) -> str:
+    return f"/{PROSPECT_PAGE_PATH}?url={urllib.parse.quote(url or '', safe='')}"
 
 
 def refresh_button(key: str = "refresh") -> None:

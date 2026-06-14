@@ -200,7 +200,7 @@ def main():
 
     # Warn (don't block) on un-sectioned prompts — research stage still runs, but the
     # campaign's research instructions won't be staged. Re-section via the Modes UI.
-    sample_mode = mode or (leads[0].get("mode") or "generic")
+    sample_mode = mode or (leads[0].get("mode") or "sg-daily")
     if not has_sections(_campaign_prompt(sample_mode)):
         print(f"  [warn] mode '{sample_mode}' prompt has no === sections === — "
               "staged batch works best with sectioned prompts (see scripts/reseed_modes.py)")

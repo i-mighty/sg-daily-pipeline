@@ -5,7 +5,6 @@ import streamlit as st
 import ui
 from utils import stream_script
 
-st.set_page_config(page_title="Batches · SG Daily", page_icon="🛰️", layout="wide")
 ui.inject_css()
 
 head_l, head_r = st.columns([5, 1])

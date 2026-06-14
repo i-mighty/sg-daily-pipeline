@@ -565,7 +565,7 @@ def slugify(text: str) -> str:
 # ── Core analysis ─────────────────────────────────────────────────────────────
 
 def _build_prompt(url: str, company_name: str, industry_hint: str, notes: str,
-                  mode: str = "generic", lead_category: str = "") -> str:
+                  mode: str = "sg-daily", lead_category: str = "") -> str:
     today = datetime.now().strftime("%Y-%m-%d")
 
     # Load prompt from DB; fall back to hardcoded constants for built-in modes
@@ -705,8 +705,8 @@ async def analyze_company(row: dict, semaphore: asyncio.Semaphore,
         notes         = row.get("notes", "")
         lead_category = row.get("lead_category", "")
 
-        # Mode: explicit override > row's mode column > "generic"
-        mode = mode_override or row.get("mode", "generic").strip().lower() or "generic"
+        # Mode: explicit override > row's mode column > "sg-daily"
+        mode = mode_override or row.get("mode", "sg-daily").strip().lower() or "sg-daily"
 
         label = company_name or url
         print(f"[START] {label}  [{mode}]")
@@ -823,7 +823,7 @@ async def main():
         print("No pending companies in DB. Run discover_leads.py first.")
         return
 
-    mode_label = mode_override or "generic (per-row)"
+    mode_label = mode_override or "sg-daily (per-row)"
     print(f"\nAnalyzing {len(to_process)} companies  |  mode={mode_label}  |  concurrency={args.concurrency}  |  model={resolve_model(MODEL_TIER)}\n")
 
     semaphore = asyncio.Semaphore(args.concurrency)

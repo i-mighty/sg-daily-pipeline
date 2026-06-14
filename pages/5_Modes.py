@@ -73,7 +73,6 @@ def _render_edit_form(mode: dict):
             st.rerun()
 
 
-st.set_page_config(page_title="Modes", page_icon="⚙️", layout="wide")
 
 st.title("⚙️ Pipeline Modes")
 st.caption("Each mode has its own discovery prompt, analysis prompt, and pipeline settings. "

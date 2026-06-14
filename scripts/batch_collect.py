@@ -118,7 +118,7 @@ def _save_result(lead: dict, md_content: str, json_data: dict, mode: str) -> Non
     dm = json_data.get("key_decision_maker", {})
     db.upsert_lead({
         "url":                url,
-        "mode":               mode or "generic",
+        "mode":               mode or "sg-daily",
         "status":             "done",
         "company_name":       json_data.get("company_name", company_name),
         "prospect_score":     json_data.get("prospect_score"),
@@ -187,7 +187,7 @@ def _process_batch(batch_row: dict) -> int:
     batch_id   = batch_row["batch_id"]
     stage      = batch_row.get("stage")
     run_id     = batch_row.get("parent_batch_id")
-    batch_mode = batch_row.get("mode") or "generic"
+    batch_mode = batch_row.get("mode") or "sg-daily"
     lead_ids   = batch_row["lead_ids"] if isinstance(batch_row["lead_ids"], list) else json.loads(batch_row["lead_ids"] or "[]")
 
     leads_by_id = db.get_leads_by_ids([int(i) for i in lead_ids])

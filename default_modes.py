@@ -236,18 +236,9 @@ Return exactly {NUM_LEADS} companies. Only include companies you verified during
 """
 
 # ── Default modes registry ─────────────────────────────────────────────────────
-# Only generic, product-agnostic modes belong here.
-# Customer-specific modes are created via the Modes UI and stored in the DB.
+# sg-daily is the product's default mode; it is installed via scripts/seed_sg_daily.py
+# (or the "Install SG Daily" button on the Modes page) and lives in the DB. Nothing is
+# auto-seeded here, so a fresh DB starts empty and the operator installs sg-daily.
+# The _GENERIC_* prompts above are kept only as a starting template for new custom modes.
 
-DEFAULT_MODES = [
-    {
-        "name":             "generic",
-        "label":            "Generic B2B",
-        "description":      "General-purpose B2B prospect analysis. Edit the prompts to match your ICP.",
-        "analysis_prompt":  _GENERIC_ANALYSIS,
-        "discovery_prompt": _GENERIC_DISCOVERY,
-        "discover_count":   0,
-        "queue_size":       5,
-        "is_active":        0,
-    },
-]
+DEFAULT_MODES: list[dict] = []

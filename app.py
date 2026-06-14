@@ -1,9 +1,13 @@
-import pandas as pd
-import plotly.express as px
+"""Entry point / router for the SG Daily control dashboard.
+
+Uses st.navigation so we control exactly which pages appear in the sidebar.
+Queue and Prospect are routable but hidden (visibility="hidden"): Prospect opens
+from a lead's "Open ↗" link, and the outreach/send view lives on that page.
+"""
+
 import streamlit as st
 
 import ui
-from utils import grade, grade_emoji
 
 st.set_page_config(
     page_title="SG Daily · Sales Pipeline",
@@ -12,182 +16,17 @@ st.set_page_config(
 )
 ui.inject_css()
 
-head_l, head_r = st.columns([5, 1])
-with head_l:
-    st.title("🎯 SG Daily Sales Pipeline")
-    st.caption("Viral Asia · Automated lead intelligence · Use the sidebar to navigate")
-with head_r:
-    ui.refresh_button("refresh_home")
-
-analyses  = ui.analyses()
-prospects = ui.prospects()
-batch_rows = ui.batches()
-
-# ── Metric cards ──────────────────────────────────────────────────────────────
-
-scores   = [float(a.get("prospect_score") or 0) for a in analyses]
-avg      = round(sum(scores) / len(scores), 1) if scores else 0
-hot      = sum(1 for s in scores if s >= 75)
-pending  = sum(1 for p in prospects if p.get("status", "pending").lower() in {"pending", ""})
-batching = sum(1 for p in prospects if p.get("status", "").lower() == "batching")
-sent     = sum(1 for a in analyses if a.get("outreach_status", "") == "sent")
-errors   = sum(1 for p in prospects if p.get("status", "").lower() == "error")
-
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Total Analyzed",   len(analyses))
-c2.metric("🔥 Hot Leads ≥75", hot)
-c3.metric("⏳ Pending",        pending)
-c4.metric("🛰️ In Batch",       batching)
-c5.metric("📬 Outreach Sent",  sent)
-c6.metric("⚠️ Errors",         errors, delta=f"-{errors}" if errors else None,
-          delta_color="inverse")
-
-# ── Needs attention ───────────────────────────────────────────────────────────
-
-alerts = []
-if errors:
-    alerts.append(f"❌ **{errors}** lead(s) errored — check the Leads page.")
-if batching:
-    active_batches = sum(1 for b in batch_rows
-                         if b.get("status") not in ("collected", "failed", "expired", "cancelled"))
-    alerts.append(f"🛰️ **{batching}** lead(s) in flight across **{active_batches}** active batch round(s).")
-if pending > 0 and not batching:
-    alerts.append(f"⏳ **{pending}** pending lead(s) awaiting analysis.")
-if alerts:
-    st.warning("  \n".join(alerts))
-
-st.divider()
-
-# ── Charts ────────────────────────────────────────────────────────────────────
-
-if analyses:
-    col_chart, col_pie = st.columns(2)
-
-    with col_chart:
-        grade_counts = {"A+": 0, "A": 0, "B": 0, "C": 0, "D": 0}
-        for a in analyses:
-            g = grade(a.get("prospect_score"))
-            if g in grade_counts:
-                grade_counts[g] += 1
-        fig = px.bar(
-            x=list(grade_counts.keys()),
-            y=list(grade_counts.values()),
-            color=list(grade_counts.keys()),
-            color_discrete_map={
-                "A+": "#27ae60", "A": "#2ecc71",
-                "B": "#2980b9", "C": "#f39c12", "D": "#e74c3c",
-            },
-            labels={"x": "Grade", "y": "Leads"},
-            title="Score Distribution",
-        )
-        fig.update_layout(showlegend=False, height=260,
-                          margin=dict(t=40, b=0, l=0, r=0))
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col_pie:
-        cats: dict[str, int] = {}
-        for a in analyses:
-            c = a.get("lead_category") or "Generic / Unknown"
-            cats[c] = cats.get(c, 0) + 1
-        fig2 = px.pie(
-            names=list(cats.keys()),
-            values=list(cats.values()),
-            title="Lead Category Split",
-            color_discrete_sequence=["#0f3460", "#2980b9", "#27ae60", "#f39c12"],
-            hole=0.4,
-        )
-        fig2.update_layout(height=260, margin=dict(t=40, b=0, l=0, r=0))
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.divider()
-
-# ── Recent analyses table ─────────────────────────────────────────────────────
-
-st.subheader("All Analyzed Leads")
-
-if not analyses:
-    st.info("No analyses yet. Go to **Discover** → **Analyze** to build your pipeline.")
-else:
-    rows = []
-    for a in analyses:
-        sc = a.get("prospect_score", "?")
-        g  = grade(sc)
-        rows.append({
-            " ":          grade_emoji(g),
-            "Company":    a.get("company_name", "?"),
-            "Score":      int(sc) if sc not in ("?", "", None) else "?",
-            "Grade":      g,
-            "Category":   (a.get("lead_category") or "—")[:30],
-            "Industry":   (a.get("industry") or "—")[:25],
-            "Key DM":     (a.get("key_decision_maker") or {}).get("name", "—") if isinstance(a.get("key_decision_maker"), dict) else "—",
-            "Outreach":   a.get("outreach_status", "pending"),
-            "Analyzed":   a.get("analysis_date", "—"),
-        })
-
-    df = pd.DataFrame(rows)
-    st.dataframe(
-        df,
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Score": st.column_config.ProgressColumn(
-                "Score", min_value=0, max_value=100, format="%d"
-            ),
-        },
-    )
-
-    # ── Prospect drawer ───────────────────────────────────────────────────────
-    st.divider()
-    st.subheader("Prospect Detail")
-    ui.prospect_picker(analyses, key="home_picker")
-
-# ── Pipeline stage funnel ─────────────────────────────────────────────────────
-
-if prospects:
-    st.divider()
-    st.subheader("Pipeline Funnel")
-
-    stage_counts = {
-        "Discovered":     len(prospects),
-        "Analyzed":       len(analyses),
-        "Hot (≥75)":      hot,
-        "Outreach Sent":  sent,
-    }
-    fig3 = px.funnel(
-        x=list(stage_counts.values()),
-        y=list(stage_counts.keys()),
-        color_discrete_sequence=["#0f3460"],
-    )
-    fig3.update_layout(height=220, margin=dict(t=10, b=0, l=0, r=0))
-    st.plotly_chart(fig3, use_container_width=True)
-
-# ── Pipeline run history ──────────────────────────────────────────────────────
-
-runs = ui.pipeline_runs(limit=30)
-if runs:
-    st.divider()
-    st.subheader("Pipeline Run History")
-    hist = pd.DataFrame([
-        {
-            "Run":        r.get("started_at", "")[:16],
-            "Discovered": r.get("discovered", 0) or 0,
-            "Analyzed":   r.get("analyzed", 0) or 0,
-            "Queued":     r.get("queued", 0) or 0,
-        }
-        for r in reversed(runs)
-    ])
-    fig4 = px.bar(
-        hist, x="Run", y=["Discovered", "Analyzed", "Queued"],
-        barmode="group",
-        color_discrete_sequence=["#2563eb", "#27ae60", "#f39c12"],
-    )
-    fig4.update_layout(height=260, margin=dict(t=10, b=0, l=0, r=0),
-                       legend_title_text="", xaxis_title="")
-    st.plotly_chart(fig4, use_container_width=True)
-
-# ── OpenAI batches ────────────────────────────────────────────────────────────
-
-if batch_rows:
-    st.divider()
-    st.subheader("🛰️ OpenAI Batch Runs")
-    ui.batches_panel(batch_rows)
+nav = st.navigation([
+    st.Page("home.py",             title="Home",     icon="🎯", url_path="home", default=True),
+    st.Page("pages/1_Discover.py", title="Discover", icon="🔍", url_path="discover"),
+    st.Page("pages/2_Analyze.py",  title="Analyze",  icon="⚡", url_path="analyze"),
+    st.Page("pages/3_Leads.py",    title="Leads",    icon="📇", url_path="leads"),
+    st.Page("pages/5_Modes.py",    title="Modes",    icon="⚙️", url_path="modes"),
+    st.Page("pages/6_Batches.py",  title="Batches",  icon="🛰️", url_path="batches"),
+    # Hidden from the sidebar but still routable:
+    st.Page("pages/7_Prospect.py", title="Prospect", icon="📄",
+            url_path="prospect", visibility="hidden"),
+    st.Page("pages/4_Queue.py",    title="Queue",    icon="📬",
+            url_path="queue", visibility="hidden"),
+])
+nav.run()

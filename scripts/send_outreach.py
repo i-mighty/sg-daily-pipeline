@@ -72,6 +72,37 @@ def build_outreach_email(lead: dict) -> dict | None:
     }
 
 
+def send_one(lead: dict, dry_run: bool = False) -> dict:
+    """Send the outreach email for a single lead. Returns a result dict.
+
+    Used by the Prospect detail page so an operator can send one prospect's email
+    on demand (the cron's send_outreach() handles the daily queue in bulk).
+    """
+    company = lead.get("company_name", lead.get("url", "?"))
+    if not email_configured():
+        return {"company": company, "status": "error", "error": "SMTP_USER/SMTP_PASSWORD not set"}
+
+    outreach = build_outreach_email(lead)
+    if not outreach:
+        return {"company": company, "status": "skipped", "reason": "no valid email or body in analysis"}
+
+    if dry_run:
+        return {"company": company, "status": "dry_run", **outreach}
+
+    try:
+        to_field = (f"{outreach['to_name']} <{outreach['to_email']}>"
+                    if outreach["to_name"] else outreach["to_email"])
+        html_body = outreach["body"].replace("\n", "<br>")
+        html = ('<html><body style="font-family:Arial,sans-serif;font-size:14px;'
+                f'line-height:1.6;color:#222">{html_body}</body></html>')
+        send_email(to_field, outreach["subject"], html=html, text=outreach["body"],
+                   from_name="The SG Daily")
+        db.mark_outreach_sent(lead["url"], "sent")
+        return {"company": company, "status": "sent", **outreach}
+    except Exception as e:
+        return {"company": company, "status": "error", "error": str(e)}
+
+
 def send_outreach(date_str: str, dry_run: bool = False, mode: str = "sg-daily") -> list[dict]:
     """Send outreach emails for the given date's queue. Returns results list."""
     if not email_configured():

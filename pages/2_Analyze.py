@@ -4,7 +4,6 @@ import streamlit as st
 import db
 from utils import load_prospects, stream_script
 
-st.set_page_config(page_title="Analyze Leads", page_icon="⚡", layout="wide")
 
 st.title("⚡ Analyze Leads")
 st.caption("Runs the full AI analysis on pending leads — scores, decision makers, outreach emails.")
@@ -27,7 +26,7 @@ for p in pending:
         "Company":    p.get("company_name") or p.get("url"),
         "Category":   p.get("lead_category", "—"),
         "Priority":   p.get("priority", "—"),
-        "Mode":       p.get("mode", "generic"),
+        "Mode":       p.get("mode", "sg-daily"),
         "Status":     p.get("status", "pending"),
         "URL":        p.get("url", ""),
     })

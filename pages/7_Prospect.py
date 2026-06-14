@@ -5,12 +5,18 @@ which deep-links with ?url=<prospect url>. Also usable standalone: pick any pros
 from the selector. Works for un-analyzed leads too (shows discovery only).
 """
 
+import sys
+from pathlib import Path
+
 import streamlit as st
 
+import db
 import ui
 from utils import grade, grade_emoji
 
-st.set_page_config(page_title="Prospect", page_icon="📄", layout="wide")
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+from send_outreach import build_outreach_email, send_one  # noqa: E402
+
 ui.inject_css()
 
 prospects = ui.prospects()
@@ -74,6 +80,39 @@ st.divider()
 # ── Analysis ───────────────────────────────────────────────────────────────────
 
 if rec.get("analysis_json") or rec.get("status") == "done":
+    # ── Outreach (send from here — the Queue page is retired) ──────────────────
+    with st.container(border=True):
+        st.markdown("#### ✉️ Outreach")
+        sts     = (rec.get("outreach_status") or "pending")
+        preview = build_outreach_email(rec)
+        oc1, oc2, oc3 = st.columns([3, 1, 1])
+        with oc1:
+            st.markdown(f"Status: {ui.status_badge(sts)}", unsafe_allow_html=True)
+            if rec.get("outreach_sent_date"):
+                st.caption(f"Sent {rec['outreach_sent_date']}")
+            if preview:
+                st.caption(f"To: {preview['to_name']} <{preview['to_email']}> · "
+                           f"Subject: {preview['subject']}")
+            else:
+                st.warning("No valid recipient email or body in the analysis yet.")
+        already = sts.lower() in ("sent", "replied", "converted")
+        if oc2.button("✉️ Send now", type="primary",
+                      disabled=(preview is None or already), key="send_now"):
+            with st.spinner("Sending…"):
+                res = send_one(rec)
+            if res.get("status") == "sent":
+                st.success(f"Sent to {res.get('to_email')}")
+            elif res.get("status") == "skipped":
+                st.warning(res.get("reason", "Skipped"))
+            else:
+                st.error(res.get("error", "Send failed"))
+            ui.clear_caches()
+            st.rerun()
+        if oc3.button("Mark sent", disabled=already, key="mark_sent"):
+            db.mark_outreach_sent(rec.get("url", ""), "sent")
+            ui.clear_caches()
+            st.rerun()
+
     ui.render_prospect_detail(rec)
 else:
     status = (rec.get("status") or "pending").lower()
