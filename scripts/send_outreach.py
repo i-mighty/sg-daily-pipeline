@@ -26,11 +26,17 @@ from dotenv import load_dotenv
 load_dotenv(BASE_DIR / ".env")
 
 import db  # noqa: E402
+from email_verify import check_sendable  # noqa: E402
 from emailer import email_configured, send_email  # noqa: E402
 
 
 def build_outreach_email(lead: dict) -> dict | None:
-    """Extract validated outreach fields from a lead's analysis_json."""
+    """Extract validated outreach fields from a lead's analysis_json.
+
+    Returns None (= skip) unless the recipient address passes the send-time
+    verification gate: real address (not a pattern template), acceptable role
+    inbox, deliverable domain, and confidence above EMAIL_MIN_CONFIDENCE.
+    """
     raw = lead.get("analysis_json") or ""
     try:
         data = json.loads(raw) if raw else {}
@@ -45,7 +51,9 @@ def build_outreach_email(lead: dict) -> dict | None:
     if not isinstance(dm, dict):
         dm = {}
 
-    to_email = email_data.get("to_email") or dm.get("email_pattern", "")
+    # NOTE: never fall back to dm["email_pattern"] — that is a pattern template
+    # ("first.last@acme.com"), not an address, and used to get sent literally.
+    to_email = email_data.get("to_email") or dm.get("email", "")
     to_name  = email_data.get("to_name")  or dm.get("name", "")
     to_title = email_data.get("to_title") or dm.get("title", "")
     subject  = email_data.get("subject_a") or email_data.get("subject", "")
@@ -53,6 +61,12 @@ def build_outreach_email(lead: dict) -> dict | None:
     cta      = email_data.get("cta", "Are you free for a 10-minute call?")
 
     if not to_email or "@" not in to_email or not body:
+        return None
+
+    ok, reason = check_sendable(to_email, lead.get("url", ""),
+                                confidence=dm.get("email_confidence"))
+    if not ok:
+        print(f"  [BLOCK] {lead.get('company_name', '?')} <{to_email}> — {reason}")
         return None
 
     # Strip em dashes regardless of what the model generated

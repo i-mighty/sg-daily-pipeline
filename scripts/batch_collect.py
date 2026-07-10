@@ -38,6 +38,8 @@ SCRIPTS  = Path(__file__).parent
 RESULTS  = BASE_DIR / "results"
 sys.path.insert(0, str(BASE_DIR))
 import db  # noqa: E402
+import email_verify  # noqa: E402
+import research_tools  # noqa: E402
 from analysis_pipeline import merge_outputs, render_report_md  # noqa: E402
 
 OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -214,6 +216,19 @@ def _process_batch(batch_row: dict) -> int:
                 text = item["response"]["body"]["choices"][0]["message"]["content"] or ""
                 data = _extract_json(text)
                 if item_stage in ("research", "contact", "score"):
+                    if item_stage == "contact":
+                        # Deterministic verification before the outreach round reads
+                        # this: MX/verifier-check the model's pick plus site-scraped
+                        # inboxes; may blank the email if nothing survives.
+                        try:
+                            dossier     = db.get_stage_outputs(int(lead["id"])).get("dossier", {})
+                            site_emails = research_tools.scrape_site_emails(lead.get("url", ""))
+                            data = email_verify.finalize_contact_email(
+                                data, dossier, lead.get("url", ""), site_emails)
+                            print(f"  [email] {company}: {data.get('email') or 'none'} "
+                                  f"({data.get('email_status')}, {data.get('email_confidence')}/100)")
+                        except Exception as e:
+                            print(f"  [warn] email verification failed for {company}: {e}")
                     db.save_stage_output(int(lead["id"]), item_stage, data)
                     print(f"  [{item_stage}] {company} — saved")
                 else:  # outreach -> finalize

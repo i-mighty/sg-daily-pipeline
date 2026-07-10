@@ -20,6 +20,8 @@ import urllib.parse
 import requests
 from bs4 import BeautifulSoup
 
+from email_verify import BAD_ROLE, RE_EMAIL, is_junk_email
+
 MAX_PAGE_CHARS   = 6000
 MAX_SEARCH_CHARS = 2000
 MAX_SEARCH_HITS  = 5
@@ -96,6 +98,46 @@ def base_url(url: str) -> str:
     return f"{p.scheme}://{p.netloc}"
 
 
+# Pages where companies publish real contact addresses (footer included — note that
+# fetch_url() strips footers, so this scraper works on the RAW html instead).
+EMAIL_SCRAPE_PATHS = ["", "/contact", "/contact-us", "/about", "/about-us", "/team", "/press", "/privacy"]
+
+
+def scrape_site_emails(url: str, max_pages: int = 6) -> list[dict]:
+    """
+    Deterministically harvest email addresses published on the company's own
+    website. These are ground truth: an address seen verbatim on an official page
+    is the strongest deliverability evidence there is.
+
+    Returns [{"email": ..., "source_url": ...}], deduped, junk filtered.
+    """
+    if not url:
+        return []
+    base    = base_url(url)
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+    found: dict[str, str] = {}
+    fetched = 0
+    for path in EMAIL_SCRAPE_PATHS:
+        if fetched >= max_pages:
+            break
+        page = base + path
+        try:
+            r = requests.get(page, headers=headers, timeout=12, allow_redirects=True)
+            if r.status_code >= 400:
+                continue
+            html = r.text
+        except Exception:
+            continue
+        fetched += 1
+        for m in RE_EMAIL.finditer(html):
+            email = m.group(0).lower().rstrip(".")
+            # Drop template noise and never-outreach inboxes (privacy@, support@, …)
+            # so neither the model corpus nor the finalizer ever sees them.
+            if not is_junk_email(email) and email.split("@", 1)[0] not in BAD_ROLE:
+                found.setdefault(email, page)
+    return [{"email": e, "source_url": s} for e, s in found.items()]
+
+
 def deep_enrich(company_name: str, url: str) -> str:
     """
     Build a rich research corpus: best-effort company pages + broad firmographic
@@ -137,14 +179,29 @@ def deep_enrich(company_name: str, url: str) -> str:
     return corpus[:MAX_ENRICH_CHARS] or "[no data retrieved]"
 
 
-def enrich_contact(company_name: str, url: str, dossier: dict) -> str:
+def enrich_contact(company_name: str, url: str, dossier: dict,
+                   site_emails: list[dict] | None = None) -> str:
     """
-    Targeted decision-maker research: team pages (best-effort) plus off-site
+    Targeted decision-maker research: emails scraped from the official site
+    (ground truth for the contact stage), team pages (best-effort), plus off-site
     searches across LinkedIn, contact databases, and news — where contact info
     actually lives. Searches whoever the research stage already surfaced by name.
+
+    site_emails: pre-scraped [{"email", "source_url"}]; None -> scrape here.
     """
     base  = base_url(url) if url else ""
     parts: list[str] = []
+
+    if site_emails is None:
+        try:
+            site_emails = scrape_site_emails(url)
+        except Exception:
+            site_emails = []
+    if site_emails:
+        parts.append(
+            "### Emails published on the company's official website (verified sources)\n"
+            + "\n".join(f"- {se['email']}  (seen on {se['source_url']})" for se in site_emails[:15])
+        )
 
     for path in ("/team", "/leadership", "/our-team", "/people", "/contact"):
         if not base:

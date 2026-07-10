@@ -38,7 +38,9 @@ DEFAULT_CONTACT_INSTRUCTION = """Identify the single best decision maker to cont
 for a B2B sales conversation (typically Head of Sales, VP Revenue, Commercial
 Director, or a Founder who owns sales). Use the dossier's candidate contacts and any
 email pattern found. Capture their name, title, LinkedIn if known, a specific
-personalization anchor, and resolve their email address per the system policy."""
+personalization anchor, and resolve their email address per the system policy:
+verified sources first, include the source URL, and always record the best
+role inbox from the official site as fallback_generic_email."""
 
 
 # ── Stage output contracts (shapes shown to the model) ──────────────────────────
@@ -59,7 +61,10 @@ DOSSIER_SCHEMA = """{
 
 CONTACT_SCHEMA = """{
   "name": "", "title": "", "linkedin": "",
-  "email": "", "email_source": "found|derived",
+  "email": "", "email_source": "found|generic|derived",
+  "email_source_url": "",
+  "email_confidence": "high|medium|low",
+  "fallback_generic_email": "",
   "personalization_anchor": "",
   "buying_committee": [{"name": "", "title": "", "role": ""}]
 }"""
@@ -265,7 +270,9 @@ def render_report_md(j: dict) -> str:
         "",
         "## Decision Maker",
         f"- {dm.get('name','')} — {dm.get('title','')}",
-        f"- Email: {dm.get('email','')} ({dm.get('email_source','')})",
+        f"- Email: {dm.get('email','') or 'not resolved'} ({dm.get('email_source','')}"
+        + (f", {dm.get('email_status')}, confidence {dm.get('email_confidence')}/100" if dm.get("email_status") else "")
+        + ")",
         f"- Anchor: {dm.get('personalization_anchor','')}",
         "",
         "## Buying Signals",
@@ -317,6 +324,13 @@ def merge_outputs(
     score    = score or {}
     outreach = outreach or {}
 
+    outreach_email = _clean_email(outreach.get("outreach_email", {}))
+    # The verified contact email is authoritative: when the finalizer ran
+    # (email_status present), the outreach stage may not re-guess the recipient —
+    # including forcing it blank when no valid address survived verification.
+    if isinstance(outreach_email, dict) and "email_status" in contact:
+        outreach_email["to_email"] = contact.get("email", "")
+
     return {
         "company_name":     dossier.get("company_name") or lead.get("company_name", ""),
         "url":              lead.get("url", ""),
@@ -341,6 +355,10 @@ def merge_outputs(
             "title":                  contact.get("title", ""),
             "email":                  contact.get("email", ""),
             "email_source":           contact.get("email_source", ""),
+            "email_source_url":       contact.get("email_source_url", ""),
+            "email_status":           contact.get("email_status", ""),
+            "email_confidence":       contact.get("email_confidence", ""),
+            "fallback_generic_email": contact.get("fallback_generic_email", ""),
             "email_pattern":          dossier.get("email_pattern", ""),
             "linkedin":               contact.get("linkedin", ""),
             "personalization_anchor": contact.get("personalization_anchor", ""),
@@ -360,7 +378,7 @@ def merge_outputs(
         "sg_dollar_filter":  dossier.get("sg_dollar_filter", {}),
         "hook_ideas":        outreach.get("hook_ideas", []),
 
-        "outreach_email":     _clean_email(outreach.get("outreach_email", {})),
+        "outreach_email":     outreach_email,
         "recommended_action": outreach.get("recommended_action", ""),
         "immediate_actions":  outreach.get("immediate_actions", []),
 

@@ -45,6 +45,7 @@ SCRIPTS  = Path(__file__).parent
 
 sys.path.insert(0, str(BASE_DIR))
 import db  # noqa: E402
+import email_verify  # noqa: E402
 import research_tools  # noqa: E402
 from providers import resolve_model, run_agentic_loop, complete, require_api_key  # noqa: E402
 from analysis_pipeline import build_stage_prompt, merge_outputs, render_report_md  # noqa: E402
@@ -667,11 +668,14 @@ async def _staged_analyze(row: dict, campaign_prompt: str) -> dict:
     dossier = _extract_json(research_text)
 
     # ── Stages 2+3: contact ∥ score (no tools, FAST) ────────────────────────────
-    # Targeted decision-maker research for the contact stage (off-site sources beat
-    # the company site for real emails). Blocking I/O -> run off the event loop.
+    # Targeted decision-maker research for the contact stage: emails scraped from
+    # the official site (ground truth) plus off-site sources (LinkedIn, directories,
+    # news). Blocking I/O -> run off the event loop.
+    site_emails = await asyncio.to_thread(
+        research_tools.scrape_site_emails, row.get("url", ""))
     dm_research = await asyncio.to_thread(
         research_tools.enrich_contact, row.get("company_name", "") or row.get("url", ""),
-        row.get("url", ""), dossier,
+        row.get("url", ""), dossier, site_emails,
     )
     sys_c, user_c = build_stage_prompt("contact", campaign_prompt, row, today,
                                        prior={"dossier": dossier}, research_data=dm_research)
@@ -683,6 +687,15 @@ async def _staged_analyze(row: dict, campaign_prompt: str) -> dict:
     )
     contact = _extract_json(contact_text)
     score   = _extract_json(score_text)
+
+    # Deterministic verification: MX/verifier-check every candidate (model's pick,
+    # its generic fallback, site-scraped inboxes) and settle on the best BEFORE the
+    # outreach stage writes to it. May blank the email if nothing survives.
+    contact = await asyncio.to_thread(
+        email_verify.finalize_contact_email, contact, dossier, row.get("url", ""), site_emails)
+    dm_email = contact.get("email") or "none"
+    print(f"[email]  {label}: {dm_email} "
+          f"({contact.get('email_status')}, confidence {contact.get('email_confidence')}/100)")
 
     # ── Stage 4: outreach (no tools, QUALITY — email quality matters) ───────────
     sys_o, user_o = build_stage_prompt("outreach", campaign_prompt, row, today,
