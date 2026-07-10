@@ -1,11 +1,18 @@
 """Home — pipeline overview. Rendered by the st.navigation router in app.py."""
 
+import sys
+from pathlib import Path
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import db
 import ui
 from utils import grade, grade_emoji
+
+sys.path.insert(0, str(Path(__file__).parent / "scripts"))
+from send_outreach import build_outreach_email, send_one  # noqa: E402
 
 head_l, head_r = st.columns([5, 1])
 with head_l:
@@ -49,6 +56,63 @@ if pending > 0 and not batching:
     alerts.append(f"⏳ **{pending}** pending lead(s) awaiting analysis.")
 if alerts:
     st.warning("  \n".join(alerts))
+
+# ── Email controls ────────────────────────────────────────────────────────────
+# Toggle gates the daily cron's outreach step (settings.auto_outreach_enabled);
+# the manual sender fires one prospect's email on demand via send_one().
+
+with st.container(border=True):
+    ec_l, ec_r = st.columns([1, 2])
+
+    with ec_l:
+        st.markdown("#### 📧 Email Controls")
+        enabled = db.outreach_enabled()
+        new_val = st.toggle(
+            "Auto outreach emails",
+            value=enabled,
+            help="When off, the daily pipeline skips sending outreach emails to "
+                 "prospects (the pipeline report email still sends).",
+        )
+        if new_val != enabled:
+            db.set_setting("auto_outreach_enabled", "true" if new_val else "false")
+            st.toast("Auto outreach enabled ✅" if new_val else "Auto outreach disabled ⛔")
+            st.rerun()
+        st.caption("Cron will **send** outreach emails." if enabled
+                   else "Cron will **skip** outreach emails.")
+
+    with ec_r:
+        st.markdown("#### ✉️ Send One Manually")
+        sendable = [
+            a for a in analyses
+            if (a.get("outreach_status") or "pending").lower()
+            not in {"sent", "replied", "converted"}
+            and build_outreach_email(a)
+        ]
+        if not sendable:
+            st.caption("No prospects with a ready, unsent outreach email.")
+        else:
+            options = {
+                f"{a.get('company_name') or a.get('url')} · "
+                f"{int(a.get('prospect_score') or 0)}/100": a
+                for a in sendable
+            }
+            choice  = st.selectbox("Prospect", list(options.keys()),
+                                   label_visibility="collapsed", key="manual_send_pick")
+            lead    = options[choice]
+            preview = build_outreach_email(lead)
+            st.caption(f"To: {preview['to_name']} <{preview['to_email']}> · "
+                       f"Subject: {preview['subject']}")
+            if st.button("✉️ Send this email now", type="primary", key="manual_send_btn"):
+                with st.spinner("Sending…"):
+                    res = send_one(lead)
+                if res.get("status") == "sent":
+                    st.toast(f"Sent to {res.get('to_email')} ✅")
+                    ui.clear_caches()
+                    st.rerun()
+                elif res.get("status") == "skipped":
+                    st.warning(res.get("reason", "Skipped"))
+                else:
+                    st.error(res.get("error", "Send failed"))
 
 st.divider()
 

@@ -126,6 +126,13 @@ CREATE TABLE IF NOT EXISTS batches (
 );
 CREATE INDEX IF NOT EXISTS idx_batches_status ON batches(status);
 
+-- Simple key/value app settings (e.g. the auto-outreach email kill switch).
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL DEFAULT '',
+    updated_at TEXT DEFAULT (now()::text)
+);
+
 -- Intermediate stage outputs, persisted between batch rounds so a run is resumable.
 -- The final merged result still lands in leads.analysis_json (shape unchanged).
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS dossier_json TEXT;
@@ -515,6 +522,29 @@ def get_queue(run_date: str, mode: str = "sg-daily") -> dict | None:
 def get_all_queues(run_date: str) -> list[dict]:
     """Return all mode queues for a given date."""
     return _all("SELECT * FROM queue_entries WHERE run_date=%s ORDER BY mode ASC", (run_date,))
+
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+
+def get_setting(key: str, default: str = "") -> str:
+    row = _one("SELECT value FROM settings WHERE key=%s", (key,))
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str):
+    _exec(
+        """INSERT INTO settings (key, value, updated_at)
+           VALUES (%s, %s, now()::text)
+           ON CONFLICT (key) DO UPDATE
+           SET value = EXCLUDED.value, updated_at = now()::text""",
+        (key, value),
+    )
+
+
+def outreach_enabled() -> bool:
+    """Master switch for automatic outreach emails. Defaults to OFF until the
+    dashboard toggle explicitly enables it."""
+    return get_setting("auto_outreach_enabled", "false") == "true"
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────

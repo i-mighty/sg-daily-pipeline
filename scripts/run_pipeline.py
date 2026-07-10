@@ -156,16 +156,22 @@ def _deliver(name: str, args: argparse.Namespace, stats: dict) -> None:
             stats["queued"] = len(json.loads(queue_entry["queue_json"]))
 
     # ── Step 4: Send outreach ─────────────────────────────────────────────────
+    # Gated on the dashboard's "Auto outreach emails" toggle (settings table) in
+    # addition to --no-email. Default is OFF; flip it on the Home page.
     if not args.no_email:
-        print(f"\n{'='*60}")
-        print(f"STEP: [{name}] Send outreach emails")
-        print(f"{'='*60}")
-        sys.path.insert(0, str(BASE_DIR / "scripts"))
-        from send_outreach import send_outreach
-        results = send_outreach(datetime.now().strftime("%Y-%m-%d"), dry_run=False, mode=name)
-        stats["outreached"] = sum(1 for r in results if r.get("status") == "sent")
-        if any(r.get("status") == "error" for r in results):
-            stats["errors"].append("some outreach emails failed")
+        if not db.outreach_enabled():
+            print(f"\n[{name}] Auto outreach is OFF (Email Controls toggle on the "
+                  f"dashboard Home page) — skipping outreach emails.")
+        else:
+            print(f"\n{'='*60}")
+            print(f"STEP: [{name}] Send outreach emails")
+            print(f"{'='*60}")
+            sys.path.insert(0, str(BASE_DIR / "scripts"))
+            from send_outreach import send_outreach
+            results = send_outreach(datetime.now().strftime("%Y-%m-%d"), dry_run=False, mode=name)
+            stats["outreached"] = sum(1 for r in results if r.get("status") == "sent")
+            if any(r.get("status") == "error" for r in results):
+                stats["errors"].append("some outreach emails failed")
 
     # ── Step 5: Send report ───────────────────────────────────────────────────
     if not args.no_email:
